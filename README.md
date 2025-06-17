@@ -7,9 +7,7 @@ A Python application that reads ADS-B data from a local JSON file and sends it t
 ## Requirements
 
 - A Raspberry Pi with ADSB reception capability
-- Python 3.6 or higher
-- readsb service installed and running
-- Am API key that can be obtained at: https://adsb.dataero.eu/get_api_key
+- An API key that can be obtained at: https://adsb.dataero.eu/get_api_key
 
 ## Install readsb (if not already done)
 
