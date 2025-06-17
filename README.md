@@ -17,7 +17,7 @@ https://github.com/wiedehopf/adsb-scripts/wiki/Automatic-installation-for-readsb
 
 ## Installation
 
-1. Clone this repository:
+1. On your Raspberry Pi, clone this repository:
    ```
    git clone https://github.com/yourusername/dataero-adsb-feeder.git
    cd dataero-adsb-feeder
@@ -28,7 +28,7 @@ https://github.com/wiedehopf/adsb-scripts/wiki/Automatic-installation-for-readsb
    sudo bash installer.sh
    ```
 
-3. When prompted, enter your Dataero API key.
+3. When prompted, enter your Dataero API key. If you don't have a Dataero API key yet, you can get one at: https://adsb.dataero.eu/get_api_key
 
 The installer will:
 - Check for Python 3 and readsb service
@@ -65,7 +65,7 @@ sudo systemctl restart dataero-feeder.service
 
 ### Available Configuration Options
 
-- `API_KEY`: Your Dataero API key (required)
+- `API_KEY`: Your Dataero API key (required). If you don't have one yet, you can get one at: https://adsb.dataero.eu/get_api_key
 - `DEBUG`: Set to `TRUE` to enable debug logging, or `FALSE` to disable it (default: `FALSE`)
 - `READSB_DATA`: The path to the local JSON file containing ADS-B data (default: `/run/readsb/aircraft.json`)
 
