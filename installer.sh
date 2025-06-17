@@ -16,8 +16,35 @@ fi
 
 # Check for readsb service
 if ! systemctl list-units --type=service --all | grep -q "readsb.service"; then
-    echo "❌ readsb.service is not installed. Please install it before proceeding."
-    exit 1
+    echo "❌ readsb.service is not installed."
+    read -p "Do you want to automatically install readsb? (yes/no): " install_readsb
+    if [[ "$install_readsb" == "yes" ]]; then
+        echo "🔄 Installing readsb..."
+        bash "$(dirname "$0")/feeder/install_readsb.sh"
+
+        # Verify installation was successful
+        if systemctl list-units --type=service --all | grep -q "readsb.service"; then
+            echo "✅ readsb.service is now installed."
+            if ! systemctl is-active --quiet readsb.service; then
+                echo "⚠️ readsb.service is not running. Attempting to start it..."
+                sudo systemctl start readsb.service
+                if systemctl is-active --quiet readsb.service; then
+                    echo "✅ readsb.service started successfully."
+                else
+                    echo "❌ Failed to start readsb.service. Please start it manually."
+                    exit 1
+                fi
+            else
+                echo "✅ readsb.service is running."
+            fi
+        else
+            echo "❌ Failed to install readsb.service. Please install it manually."
+            exit 1
+        fi
+    else
+        echo "❌ readsb.service is required for this application to function. Please install it and run this script again."
+        exit 1
+    fi
 else
     echo "✅ readsb.service is installed."
     if ! systemctl is-active --quiet readsb.service; then
