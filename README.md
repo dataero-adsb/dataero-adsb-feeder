@@ -1,5 +1,7 @@
 # Dataero ADS-B Feeder
 
+Dataero's ADS-B feeder can be configured on top of other feeds already configured on your system. It is designed to be simple and lightweight, requiring minimal system resources.
+
 A Python application that reads ADS-B data from a local JSON file and sends it to the Dataero ADS-B service.
 
 ## Requirements
