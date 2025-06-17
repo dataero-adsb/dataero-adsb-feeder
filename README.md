@@ -23,7 +23,7 @@ https://github.com/wiedehopf/adsb-scripts/wiki/Automatic-installation-for-readsb
 
 1. On your Raspberry Pi, clone this repository:
    ```
-   git clone https://github.com/yourusername/dataero-adsb-feeder.git
+   git clone https://github.com/dataero-adsb/dataero-adsb-feeder.git
    cd dataero-adsb-feeder
    ```
 
