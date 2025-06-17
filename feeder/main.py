@@ -38,15 +38,9 @@ def send_data():
         with open(READSB_DATA, "r") as f:
             data = json.load(f)
 
-        # Log the JSON data
-        #log_debug("Sending JSON data:")
-        #with open(DEBUG_LOG, "a") as log_file:
-        #    json.dump(data, log_file, indent=2)
-        #    log_file.write("\n")
-
         # Send the data
         response = requests.post(API_URL, headers=HEADERS, json=data)
-        #log_debug(f"Response: {response.status_code} {response.text}")
+        log_debug(f"Response: {response.status_code} {response.text}")
 
     except Exception as e:
         log_debug(f"Error: {e}")
