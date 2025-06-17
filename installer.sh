@@ -86,6 +86,7 @@ deactivate
 echo "✅ Virtual environment ready."
 
 # Prompt for API key
+echo "🔑 If you don't have a Dataero API key yet, you can get one at: https://adsb.dataero.eu/get_api_key"
 read -p "🔑 Enter your Dataero API key: " API_KEY
 echo "API_KEY=$API_KEY" | sudo tee "$INSTALL_DIR/.env" > /dev/null
 echo "✅ API key saved."
