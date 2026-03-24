@@ -5,13 +5,13 @@ Our feeder is a Python application that reads ADS-B data from a local JSON file 
 Dataero's ADS-B feeder can be configured on top of other feeds already configured on your system. It is designed to be simple and lightweight, requiring minimal system resources.
 
 You can access our live tracking page at: 
-https://adsb.dataero.eu
+https://radar.dataero.eu
 
 
 ## Requirements
 
 - A Raspberry Pi with ADSB reception capability
-- An API key that can be obtained at: https://adsb.dataero.eu/get_api_key
+- An API key that can be obtained at: https://radar.dataero.eu/get_api_key
 
 ## Install readsb (if not already done)
 
