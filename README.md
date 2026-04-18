@@ -11,7 +11,9 @@ https://radar.dataero.eu
 ## Requirements
 
 - A Raspberry Pi with ADSB reception capability
-- An API key that can be obtained at: https://radar.dataero.eu/get_api_key
+- Create your user on https://radar.dataero.eu
+- An API key that can be obtained at: https://radar.dataero.eu/profile
+- Once you have your API key, copy it and save it for later
 
 ## Install readsb (if not already done)
 
