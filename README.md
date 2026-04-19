@@ -1,94 +1,182 @@
 # Dataero ADS-B Feeder
 
-Our feeder is a Python application that reads ADS-B data from a local JSON file and sends it to the Dataero ADS-B service.
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Dataero's ADS-B feeder can be configured on top of other feeds already configured on your system. It is designed to be simple and lightweight, requiring minimal system resources.
+The **Dataero ADS-B Feeder** is a lightweight Python application that reads ADS-B aviation data from your local receiver and transmits it to the [Dataero flight tracking network](https://radar.dataero.eu). By running this feeder, you contribute real-time aircraft data to a growing community of aviation enthusiasts and help improve coverage across the network.
 
-You can access our live tracking page at: 
-https://radar.dataero.eu
+---
 
+## Table of Contents
 
-## Requirements
+- [How It Works](#how-it-works)
+- [Prerequisites](#prerequisites)
+- [Step 1 — Create Your Dataero Account](#step-1--create-your-dataero-account)
+- [Step 2 — Get Your API Key](#step-2--get-your-api-key)
+- [Step 3 — Install the Feeder](#step-3--install-the-feeder)
+- [Configuration](#configuration)
+- [Managing the Service](#managing-the-service)
+- [Troubleshooting](#troubleshooting)
+- [Contributing](#contributing)
 
-- A Raspberry Pi with ADSB reception capability
-- Create your user on https://radar.dataero.eu
-- An API key that can be obtained at: https://radar.dataero.eu/profile
-- Once you have your API key, copy it and save it for later
+---
 
-## Install readsb (if not already done)
+## How It Works
 
-Visit the following page for automatic installation instructions for readsb:
-https://github.com/wiedehopf/adsb-scripts/wiki/Automatic-installation-for-readsb
-
-
-## Installation
-
-1. On your Raspberry Pi, clone this repository:
-   ```
-   git clone https://github.com/dataero-adsb/dataero-adsb-feeder.git
-   cd dataero-adsb-feeder
-   ```
-
-2. Run the installer script:
-   ```
-   sudo bash installer.sh
-   ```
-
-3. When prompted, enter your Dataero API key. If you don't have a Dataero API key yet, you can get one at: https://adsb.dataero.eu/get_api_key
-
-The installer will:
-- Check for Python 3 and readsb service
-- Create an installation directory at /usr/local/dataero-adsb-feeder
-- Set up a Python virtual environment and install dependencies
-- Create a .env file with your API key
-- Set up and start a systemd service to run the feeder automatically
-
-## Usage
-
-After running the installer, the feeder runs as a systemd service and starts automatically on boot. You can manage it with standard systemd commands:
+The feeder reads aircraft data produced by `readsb` (or any compatible decoder) from a local JSON file on your system, then forwards it to the Dataero tracking platform over the internet. It runs as a background `systemd` service and starts automatically on boot.
 
 ```
-sudo systemctl status dataero-feeder.service  # Check status
-sudo systemctl restart dataero-feeder.service # Restart the service
-sudo systemctl stop dataero-feeder.service    # Stop the service
+[SDR Dongle] → [readsb decoder] → [aircraft.json] → [Dataero Feeder] → [radar.dataero.eu]
 ```
 
-The service will continuously read ADS-B data from the JSON file specified in the READSB_DATA environment variable and send it to the Dataero service.
+---
+
+## Prerequisites
+
+Before installing, make sure you have the following:
+
+- A **Raspberry Pi** (or compatible Linux system) with an ADS-B receiver set up
+- **`readsb`** (or a compatible ADS-B decoder) installed and running, producing `/run/readsb/aircraft.json`
+- **Python 3** installed on your system
+- An active internet connection
+- A **Dataero account** and **API key** (see steps below)
+
+---
+
+## Step 1 — Create Your Dataero Account
+
+You need a free Dataero account to authenticate your feeder and associate it with your station on the network.
+
+1. Open your browser and go to **[https://radar.dataero.eu](https://radar.dataero.eu)**
+2. Click **Register** and fill in the registration form with your details
+3. Confirm your email address if prompted
+4. Log in to your new account
+
+> **Already have an account?** Skip to [Step 2](#step-2--get-your-api-key).
+
+---
+
+## Step 2 — Get Your API Key
+
+Your API key is a unique token that identifies your feeder on the Dataero network. It is required during installation.
+
+1. Log in at **[https://radar.dataero.eu](https://radar.dataero.eu)**
+2. Click on your username or avatar in the top-right corner to open the menu
+3. Go to your **Profile page**
+4. Locate the **API Key** section and click **Request API Key** (or copy your existing key if one has already been generated)
+5. Copy the key — you will need it in the next step
+
+> **Keep your API key private.** Do not share it publicly or commit it to version control.
+
+---
+
+## Step 3 — Install the Feeder
+
+### Clone the repository
+
+On your Raspberry Pi (or Linux system), open a terminal and run:
+
+```bash
+git clone https://github.com/dataero-adsb/dataero-adsb-feeder.git
+cd dataero-adsb-feeder
+```
+
+### Run the installer
+
+```bash
+sudo bash installer.sh
+```
+
+The installer will guide you through the setup interactively. When prompted, **paste the API key** you copied from your Dataero profile page.
+
+### What the installer does
+
+The installer automatically:
+
+- Verifies that Python 3 and the `readsb` service are available on your system
+- Creates the installation directory at `/usr/local/dataero-adsb-feeder`
+- Sets up a Python virtual environment and installs all required dependencies
+- Writes a `.env` configuration file with your credentials
+- Registers and starts a `systemd` service so the feeder runs automatically on boot
+
+Once the installer completes, your feeder is live and contributing data to [radar.dataero.eu](https://radar.dataero.eu).
+
+---
 
 ## Configuration
 
-The configuration file is located at `/usr/local/dataero-adsb-feeder/.env`. To modify configuration after installation:
+The feeder's configuration is stored in:
 
 ```
+/usr/local/dataero-adsb-feeder/.env
+```
+
+| Setting | Description | Default |
+|---|---|---|
+| `API_KEY` | Your Dataero API key (required) | _(set during install)_ |
+| `READSB_DATA` | Path to the ADS-B JSON data file produced by your decoder | `/run/readsb/aircraft.json` |
+| `API_URL` | Dataero service endpoint | _(set automatically)_ |
+| `DEBUG` | Enable verbose logging for troubleshooting | `FALSE` |
+
+To edit the configuration after installation:
+
+```bash
 sudo nano /usr/local/dataero-adsb-feeder/.env
 ```
 
-After changing configuration, restart the service:
+After making changes, restart the service for them to take effect:
 
-```
+```bash
 sudo systemctl restart dataero-feeder.service
 ```
 
-### Available Configuration Options
+---
 
-- `API_KEY`: Your Dataero API key (required). If you don't have one yet, you can get one at: https://adsb.dataero.eu/get_api_key
-- `DEBUG`: Set to `TRUE` to enable debug logging, or `FALSE` to disable it (default: `FALSE`)
-- `READSB_DATA`: The path to the local JSON file containing ADS-B data (default: `/run/readsb/aircraft.json`)
+## Managing the Service
 
-Additional configuration options can be found in the `feeder/main.py` file:
+The feeder runs as a `systemd` service. Use the following commands to manage it:
 
-- `API_URL`: The URL of the Dataero ADS-B service
+| Action | Command |
+|---|---|
+| Check status | `sudo systemctl status dataero-feeder.service` |
+| Restart | `sudo systemctl restart dataero-feeder.service` |
+| Stop | `sudo systemctl stop dataero-feeder.service` |
+| Start | `sudo systemctl start dataero-feeder.service` |
+| Enable on boot | `sudo systemctl enable dataero-feeder.service` |
+| Disable on boot | `sudo systemctl disable dataero-feeder.service` |
+
+---
 
 ## Troubleshooting
 
-Check the systemd service logs:
+**View live logs**
 
+```bash
+sudo journalctl -u dataero-feeder.service -f
 ```
-sudo journalctl -u dataero-feeder.service
+
+**View recent logs**
+
+```bash
+sudo journalctl -u dataero-feeder.service --since "1 hour ago"
 ```
 
-If debugging is enabled (`DEBUG=TRUE` in the .env file), check `/var/log/dataero-adsb-feeder.log` for detailed logs.
+**Common issues**
 
-## License
+| Problem | Likely cause | Solution |
+|---|---|---|
+| Service fails to start | `readsb` not running | Run `sudo systemctl start readsb` and retry |
+| `aircraft.json` not found | Wrong path in config | Update `READSB_DATA` in the `.env` file |
+| Authentication error | Invalid or missing API key | Check your API key on your [Dataero profile](https://radar.dataero.eu/profile) and update `API_KEY` in `.env` |
+| No data appearing on radar | Feeder stopped or misconfigured | Check logs with `journalctl` and verify the service is running |
 
-This project is licensed under the terms of the license included in the repository.
+Enable `DEBUG=TRUE` in the `.env` file for more detailed log output when diagnosing issues.
+
+---
+
+## Contributing
+
+We welcome contributions from the community! If you find a bug, have a feature request, or want to improve the documentation, please open an issue or submit a pull request on [GitHub](https://github.com/dataero-adsb/dataero-adsb-feeder).
+
+---
+
+*Built with ❤️ by the [Dataero](https://radar.dataero.eu) community.*
