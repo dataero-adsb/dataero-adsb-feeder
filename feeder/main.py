@@ -3,7 +3,6 @@ import json
 import requests
 import os
 import socket
-import sys
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
@@ -12,9 +11,14 @@ load_dotenv()
 # Configuration
 API_KEY = os.getenv("API_KEY", "")
 API_URL = "https://radar.dataero.eu/api/v1/messages"
+HEARTBEAT_URL = "https://radar.dataero.eu/api/v1/heartbeat"
 READSB_DATA = os.getenv("READSB_DATA", "/run/readsb/aircraft.json")
 DEBUG = os.getenv("DEBUG", "FALSE").upper() == "TRUE"
 DEBUG_LOG = "/var/log/dataero-adsb-feeder.log" if DEBUG else None
+
+POLL_INTERVAL_SECONDS = 2
+HEARTBEAT_INTERVAL_SECONDS = 60
+REQUEST_TIMEOUT_SECONDS = 10
 
 HEADERS = {
     "Authorization": f"Bearer {API_KEY}",
@@ -32,20 +36,44 @@ def log_debug(message):
 def send_data():
     """Read JSON data and send it to the API, logging the process."""
     if not os.path.exists(READSB_DATA):
-        log_debug(f"Error: File not found: {READSB_DATA}")
-        sys.exit(1)
+        # Don't exit — staying alive is what lets the heartbeat keep firing
+        # so the API can distinguish "Pi online, readsb warming up / no
+        # aircraft in range" from "Pi offline".
+        log_debug(f"Skipping messages POST: file not found: {READSB_DATA}")
+        return
     try:
         with open(READSB_DATA, "r") as f:
             data = json.load(f)
 
-        # Send the data
-        response = requests.post(API_URL, headers=HEADERS, json=data)
-        log_debug(f"Response: {response.status_code} {response.text}")
+        response = requests.post(API_URL, headers=HEADERS, json=data, timeout=REQUEST_TIMEOUT_SECONDS)
+        log_debug(f"Messages response: {response.status_code} {response.text}")
 
     except Exception as e:
-        log_debug(f"Error: {e}")
+        log_debug(f"Messages error: {e}")
+
+def send_heartbeat():
+    """POST a heartbeat so the API knows this feeder is online even when
+    readsb has no aircraft to report. The feeder is identified by the bearer
+    token in the header; the API records the public source IP from the TCP
+    connection itself, which is more reliable than anything the Pi could
+    self-report from behind NAT."""
+    try:
+        response = requests.post(
+            HEARTBEAT_URL,
+            headers=HEADERS,
+            json={"timestamp": int(time.time())},
+            timeout=REQUEST_TIMEOUT_SECONDS,
+        )
+        log_debug(f"Heartbeat response: {response.status_code} {response.text}")
+    except Exception as e:
+        log_debug(f"Heartbeat error: {e}")
 
 if __name__ == "__main__":
+    last_heartbeat = 0.0
     while True:
         send_data()
-        time.sleep(2)
+        now = time.time()
+        if now - last_heartbeat >= HEARTBEAT_INTERVAL_SECONDS:
+            send_heartbeat()
+            last_heartbeat = now
+        time.sleep(POLL_INTERVAL_SECONDS)
