@@ -158,5 +158,81 @@ sudo systemctl daemon-reload
 sudo systemctl enable dataero-feeder.service
 sudo systemctl start dataero-feeder.service
 
-echo "✅ Service installed and started successfully!"
-echo "🎉 Installation complete. Your feeder is now running."
+echo "✅ Service installed and started."
+
+# ──────────────────────────────────────────────────────────────────────────
+# Post-install verification
+# ──────────────────────────────────────────────────────────────────────────
+echo ""
+echo "🔍 Running post-install checks..."
+
+# Give the service a moment to attempt its first POST before we inspect it.
+sleep 3
+
+# 1. The systemd unit must be active (not crashed during startup).
+if ! systemctl is-active --quiet dataero-feeder.service; then
+    echo "❌ dataero-feeder.service is not running. View logs with:"
+    echo "     sudo journalctl -u dataero-feeder.service -n 50"
+    exit 1
+fi
+echo "✅ Service is active."
+
+# 2. Live API test: send one real payload from this installer to validate
+#    network reachability, TLS, and the API key in a single round-trip.
+#    curl exits non-zero only on transport failures; 4xx/5xx are reported
+#    via the HTTP status code, which we inspect explicitly below.
+READSB_DATA_FILE="${READSB_DATA:-/run/readsb/aircraft.json}"
+if [ ! -r "$READSB_DATA_FILE" ]; then
+    echo "⚠️  $READSB_DATA_FILE is not readable yet — readsb may still be warming up."
+    echo "   Skipping live API test. Re-check later with:"
+    echo "     sudo journalctl -u dataero-feeder.service -f"
+else
+    if ! command -v curl &> /dev/null; then
+        echo "📦 Installing curl for the API test..."
+        sudo apt-get install -y curl
+    fi
+    echo "📡 Sending a test payload to https://radar.dataero.eu/api/v1/messages ..."
+    RESP_BODY=$(mktemp)
+    HTTP_CODE=$(curl -sS -o "$RESP_BODY" -w "%{http_code}" \
+        -X POST \
+        -H "Authorization: Bearer $API_KEY" \
+        -H "Content-Type: application/json" \
+        -H "X-Target-Host: radar.dataero.eu" \
+        --data @"$READSB_DATA_FILE" \
+        "https://radar.dataero.eu/api/v1/messages" || echo "000")
+    case "$HTTP_CODE" in
+        2*)
+            echo "✅ API accepted the upload (HTTP $HTTP_CODE). Data is flowing to radar.dataero.eu."
+            ;;
+        401|403)
+            echo "❌ API rejected your credentials (HTTP $HTTP_CODE)."
+            echo "   Check your API key on https://radar.dataero.eu/profile and edit $INSTALL_DIR/.env"
+            echo "   Response body:"
+            sed 's/^/     /' "$RESP_BODY"
+            rm -f "$RESP_BODY"
+            exit 1
+            ;;
+        000)
+            echo "❌ Could not reach https://radar.dataero.eu. Check this device's internet connection."
+            rm -f "$RESP_BODY"
+            exit 1
+            ;;
+        *)
+            echo "⚠️  Unexpected API response (HTTP $HTTP_CODE). Response body:"
+            sed 's/^/     /' "$RESP_BODY"
+            echo "   The service is running; monitor logs to confirm uploads continue:"
+            echo "     sudo journalctl -u dataero-feeder.service -f"
+            ;;
+    esac
+    rm -f "$RESP_BODY"
+fi
+
+# 3. Final sanity check: service still running after the test window.
+if ! systemctl is-active --quiet dataero-feeder.service; then
+    echo "❌ Service crashed during startup. View logs with:"
+    echo "     sudo journalctl -u dataero-feeder.service -n 50"
+    exit 1
+fi
+
+echo ""
+echo "🎉 Installation complete. Your feeder is sending data to radar.dataero.eu."

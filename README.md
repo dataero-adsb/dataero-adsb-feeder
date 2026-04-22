@@ -33,7 +33,7 @@ The feeder reads aircraft data produced by `readsb` (or any compatible decoder) 
 ## Prerequisites
 
 Before installing, make sure you have the following:
-
+At
 - A **Raspberry Pi** (or compatible Linux system) with an ADS-B receiver set up
 - **`readsb`** (or a compatible ADS-B decoder) installed and running, producing `/run/readsb/aircraft.json`
 - **Python 3** installed on your system
