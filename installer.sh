@@ -14,25 +14,46 @@ if ! command -v apt-get &> /dev/null; then
     exit 1
 fi
 
-# Check Python 3, pip, and the venv module — install any that are missing.
-# On Debian/Raspberry Pi OS these ship as three separate apt packages.
+# Phase 1: ensure python3 itself is present so we can inspect its version.
+if ! command -v python3 &> /dev/null; then
+    echo "⚠️  python3 not found. Installing..."
+    sudo apt-get update
+    sudo apt-get install -y python3
+    command -v python3 &> /dev/null || { echo "❌ python3 still unavailable after install."; exit 1; }
+fi
+
+# Detect the running Python version so we request the matching venv package
+# (e.g. python3.11-venv on Bookworm, python3.12-venv on Trixie/Ubuntu 24.04).
+# On current Debian/Ubuntu the meta-package python3-venv does NOT reliably
+# pull in the versioned one, which is why `python3 -m venv` later fails with
+# "ensurepip is not available" when only the meta-package is installed.
+PY_VER=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
+VENV_PKG="python${PY_VER}-venv"
+
+# Phase 2: check pip and the versioned venv package. dpkg -s is authoritative;
+# `python3 -m venv --help` gives false positives because the stub is part of
+# stdlib and succeeds even when ensurepip's wheels are missing.
 MISSING_PKGS=()
-command -v python3 &> /dev/null              || MISSING_PKGS+=("python3")
-python3 -m pip --version &> /dev/null        || MISSING_PKGS+=("python3-pip")
-python3 -m venv --help &> /dev/null          || MISSING_PKGS+=("python3-venv")
+python3 -m pip --version &> /dev/null || MISSING_PKGS+=("python3-pip")
+dpkg -s "$VENV_PKG" &> /dev/null      || MISSING_PKGS+=("$VENV_PKG")
 
 if [ ${#MISSING_PKGS[@]} -gt 0 ]; then
     echo "⚠️  Missing Python prerequisites: ${MISSING_PKGS[*]}"
     echo "📦 Installing via apt-get..."
     sudo apt-get update
     sudo apt-get install -y "${MISSING_PKGS[@]}"
-    # Verify each package actually works now; abort clearly if not.
-    command -v python3 &> /dev/null       || { echo "❌ python3 still unavailable after install."; exit 1; }
     python3 -m pip --version &> /dev/null || { echo "❌ pip still unavailable after install."; exit 1; }
-    python3 -m venv --help &> /dev/null   || { echo "❌ python3-venv still unavailable after install."; exit 1; }
+    dpkg -s "$VENV_PKG" &> /dev/null      || { echo "❌ $VENV_PKG still not installed."; exit 1; }
     echo "✅ Python prerequisites installed."
 else
-    echo "✅ Python 3, pip, and venv are all available."
+    echo "✅ Python 3, pip, and $VENV_PKG are all available."
+fi
+
+# If a previous run left a half-built venv behind, remove it so `python3 -m venv`
+# can re-bootstrap cleanly instead of tripping over stale files.
+if [ -d "$VENV_DIR" ] && [ ! -x "$VENV_DIR/bin/pip" ]; then
+    echo "🧹 Removing broken venv at $VENV_DIR from a previous run..."
+    sudo rm -rf "$VENV_DIR"
 fi
 
 # Check for readsb service
