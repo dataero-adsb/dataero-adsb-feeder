@@ -127,9 +127,39 @@ pip install -r "$INSTALL_DIR/requirements.txt"
 deactivate
 echo "✅ Virtual environment ready."
 
-# Prompt for API key
-echo "🔑 If you don't have a Dataero API key yet, you can get one at: https://radar.dataero.eu/profile"
-read -p "🔑 Enter your Dataero API key: " API_KEY
+# Determine API key. On a reinstall, an existing .env may already hold one —
+# offer to keep it so the operator doesn't have to dig up the key again. The
+# key is shown masked (first 4 + last 4) to avoid exposing the full secret in
+# terminal scrollback.
+EXISTING_KEY=""
+if [ -f "$INSTALL_DIR/.env" ]; then
+    EXISTING_KEY=$(sudo grep -E '^API_KEY=' "$INSTALL_DIR/.env" 2>/dev/null | head -1 | cut -d= -f2-)
+    # Strip surrounding quotes if the file was hand-edited.
+    EXISTING_KEY="${EXISTING_KEY%\"}"; EXISTING_KEY="${EXISTING_KEY#\"}"
+    EXISTING_KEY="${EXISTING_KEY%\'}"; EXISTING_KEY="${EXISTING_KEY#\'}"
+fi
+
+API_KEY=""
+if [ -n "$EXISTING_KEY" ]; then
+    KEY_LEN=${#EXISTING_KEY}
+    if [ "$KEY_LEN" -gt 8 ]; then
+        MASKED_KEY="${EXISTING_KEY:0:4}...${EXISTING_KEY: -4}"
+    else
+        MASKED_KEY="(short key)"
+    fi
+    echo "🔑 An existing API key was found in $INSTALL_DIR/.env: $MASKED_KEY ($KEY_LEN chars)"
+    read -p "🔑 Keep this key? (yes/no): " KEEP_KEY
+    if [[ "$KEEP_KEY" =~ ^(y|yes|Y|YES)$ ]]; then
+        API_KEY="$EXISTING_KEY"
+        echo "✅ Reusing existing API key."
+    fi
+fi
+
+if [ -z "$API_KEY" ]; then
+    echo "🔑 If you don't have a Dataero API key yet, you can get one at: https://radar.dataero.eu/profile"
+    read -p "🔑 Enter your Dataero API key: " API_KEY
+fi
+
 echo "API_KEY=$API_KEY" | sudo tee "$INSTALL_DIR/.env" > /dev/null
 echo "✅ API key saved."
 
