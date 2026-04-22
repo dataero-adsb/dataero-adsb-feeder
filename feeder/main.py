@@ -11,7 +11,7 @@ load_dotenv()
 
 # Configuration
 API_KEY = os.getenv("API_KEY", "")
-API_URL = "https://adsb.dataero.eu:4443/messages"
+API_URL = "https://radar.dataero.eu/api/v1/messages"
 READSB_DATA = os.getenv("READSB_DATA", "/run/readsb/aircraft.json")
 DEBUG = os.getenv("DEBUG", "FALSE").upper() == "TRUE"
 DEBUG_LOG = "/var/log/dataero-adsb-feeder.log" if DEBUG else None
@@ -19,7 +19,7 @@ DEBUG_LOG = "/var/log/dataero-adsb-feeder.log" if DEBUG else None
 HEADERS = {
     "Authorization": f"Bearer {API_KEY}",
     "Content-Type": "application/json",
-    "X-Target-Host": "adsb.dataero.eu"
+    "X-Target-Host": "radar.dataero.eu"
 }
 
 def log_debug(message):
