@@ -56,7 +56,10 @@ def send_heartbeat():
     readsb has no aircraft to report. The feeder is identified by the bearer
     token in the header; the API records the public source IP from the TCP
     connection itself, which is more reliable than anything the Pi could
-    self-report from behind NAT."""
+    self-report from behind NAT.
+
+    Failures are printed to stdout (journalctl-visible) regardless of DEBUG
+    so an operator can diagnose without toggling the verbose log file."""
     try:
         response = requests.post(
             HEARTBEAT_URL,
@@ -65,10 +68,14 @@ def send_heartbeat():
             timeout=REQUEST_TIMEOUT_SECONDS,
         )
         log_debug(f"Heartbeat response: {response.status_code} {response.text}")
+        if not response.ok:
+            print(f"heartbeat failed: HTTP {response.status_code} {response.text[:200]}", flush=True)
     except Exception as e:
         log_debug(f"Heartbeat error: {e}")
+        print(f"heartbeat error: {e}", flush=True)
 
 if __name__ == "__main__":
+    print(f"dataero-adsb-feeder running; messages={API_URL} heartbeat={HEARTBEAT_URL}", flush=True)
     last_heartbeat = 0.0
     while True:
         send_data()
