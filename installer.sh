@@ -1,4 +1,5 @@
 #!/bin/bash
+set -e
 
 INSTALL_DIR="/usr/local/dataero-adsb-feeder"
 VENV_DIR="$INSTALL_DIR/.venv"
@@ -6,12 +7,32 @@ SERVICE_FILE="/etc/systemd/system/dataero-feeder.service"
 
 echo "🚀 Starting Dataero ADS-B Feeder Installer..."
 
-# Check for Python 3
-if ! command -v python3 &> /dev/null; then
-    echo "❌ Python 3 is not installed. Please install it and rerun this script."
+# Ensure apt-get is available (required to install any missing Python packages)
+if ! command -v apt-get &> /dev/null; then
+    echo "❌ apt-get not found. This installer supports Debian-based systems only (Raspberry Pi OS, Debian, Ubuntu)."
+    echo "   Please install python3, python3-pip, and python3-venv manually, then rerun this script."
     exit 1
+fi
+
+# Check Python 3, pip, and the venv module — install any that are missing.
+# On Debian/Raspberry Pi OS these ship as three separate apt packages.
+MISSING_PKGS=()
+command -v python3 &> /dev/null              || MISSING_PKGS+=("python3")
+python3 -m pip --version &> /dev/null        || MISSING_PKGS+=("python3-pip")
+python3 -m venv --help &> /dev/null          || MISSING_PKGS+=("python3-venv")
+
+if [ ${#MISSING_PKGS[@]} -gt 0 ]; then
+    echo "⚠️  Missing Python prerequisites: ${MISSING_PKGS[*]}"
+    echo "📦 Installing via apt-get..."
+    sudo apt-get update
+    sudo apt-get install -y "${MISSING_PKGS[@]}"
+    # Verify each package actually works now; abort clearly if not.
+    command -v python3 &> /dev/null       || { echo "❌ python3 still unavailable after install."; exit 1; }
+    python3 -m pip --version &> /dev/null || { echo "❌ pip still unavailable after install."; exit 1; }
+    python3 -m venv --help &> /dev/null   || { echo "❌ python3-venv still unavailable after install."; exit 1; }
+    echo "✅ Python prerequisites installed."
 else
-    echo "✅ Python 3 is installed."
+    echo "✅ Python 3, pip, and venv are all available."
 fi
 
 # Check for readsb service
