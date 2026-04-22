@@ -186,9 +186,12 @@ echo "🔄 Reloading systemd daemon..."
 sudo systemctl daemon-reexec
 sudo systemctl daemon-reload
 sudo systemctl enable dataero-feeder.service
-sudo systemctl start dataero-feeder.service
+# Use `restart` rather than `start` so re-installs actually bounce the running
+# service and pick up the newly-copied feeder/ files. `restart` is equivalent
+# to `start` when the unit is inactive, so this also covers a fresh install.
+sudo systemctl restart dataero-feeder.service
 
-echo "✅ Service installed and started."
+echo "✅ Service installed and (re)started."
 
 # ──────────────────────────────────────────────────────────────────────────
 # Post-install verification
