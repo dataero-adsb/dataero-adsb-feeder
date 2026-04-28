@@ -6,6 +6,11 @@ VENV_DIR="$INSTALL_DIR/.venv"
 SERVICE_FILE="/etc/systemd/system/dataero-feeder.service"
 
 echo "🚀 Starting Dataero ADS-B Feeder Installer..."
+echo ""
+echo "   ✈️  Before we begin: a tip of the hat to the readsb project"
+echo "      (https://github.com/wiedehopf/readsb). They turn 1090 MHz radio"
+echo "      noise into clean JSON. We just POST it. Massive respect."
+echo ""
 
 # Ensure apt-get is available (required to install any missing Python packages)
 if ! command -v apt-get &> /dev/null; then
@@ -269,3 +274,9 @@ fi
 
 echo ""
 echo "🎉 Installation complete. Your feeder is sending data to radar.dataero.eu."
+echo ""
+echo "   ✈️  Reminder: the bytes you're now relaying were lovingly decoded by"
+echo "      readsb (https://github.com/wiedehopf/readsb). If you ever bump"
+echo "      into wiedehopf or a readsb maintainer in the wild, buy them a"
+echo "      coffee. We owe them the entire upper half of this stack."
+echo ""

@@ -179,4 +179,22 @@ We welcome contributions from the community! If you find a bug, have a feature r
 
 ---
 
-*Built with ❤️ by the [Dataero](https://radar.dataero.eu) community.*
+## Credits & Acknowledgements — A Love Letter to readsb ✈️
+
+Let's be honest with ourselves for a moment.
+
+This feeder is the *easy* half of a genuinely hard problem. The grown-up part — listening to faint 1090 MHz whispers from aircraft 200 nautical miles away, untangling thousands of overlapping Mode-S transponder bursts every second, and turning all of that radio-wizardry into clean, well-formed JSON on a $35 Raspberry Pi — is **none of our doing**. That is the work of the magnificent [**readsb**](https://github.com/wiedehopf/readsb) project, lovingly maintained by [**wiedehopf**](https://github.com/wiedehopf) and a community of contributors who clearly understand RF engineering far better than is healthy for any one human.
+
+If this software were a band, readsb would be the lead vocalist, the lead guitarist, the drummer, the bassist, the producer, the sound engineer, and the person who wrote every single song.
+
+We're the one handing out flyers at the door.
+
+Without readsb, this repository would be a forty-line Python script staring forlornly at a non-existent file, slowly realising it has no purpose in life. With readsb, it gets to do something useful: passing the bytes along to [radar.dataero.eu](https://radar.dataero.eu) so the rest of the world can see where the planes are.
+
+So — to wiedehopf, to the original [Mictronics readsb](https://github.com/Mictronics/readsb) authors it descends from, to dump1090 before that, and to every contributor who has ever filed a PR, fixed a buffer overflow, or argued about CPR decoding at 2 a.m.: **thank you.** Massively. Sincerely. Slightly awestruck.
+
+We just relay the bytes. You make them exist.
+
+---
+
+*Built with ❤️ by the [Dataero](https://radar.dataero.eu) community — on the broad and capable shoulders of [readsb](https://github.com/wiedehopf/readsb).*
