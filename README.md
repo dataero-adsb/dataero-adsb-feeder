@@ -17,6 +17,8 @@ The **Dataero ADS-B Feeder** is a lightweight Python application that reads ADS-
 - [Managing the Service](#managing-the-service)
 - [Troubleshooting](#troubleshooting)
 - [Contributing](#contributing)
+- [Third-Party Software](#third-party-software)
+- [License](#license)
 
 ---
 
@@ -194,6 +196,27 @@ Without readsb, this repository would be a forty-line Python script staring forl
 So — to wiedehopf, to the original [Mictronics readsb](https://github.com/Mictronics/readsb) authors it descends from, to dump1090 before that, and to every contributor who has ever filed a PR, fixed a buffer overflow, or argued about CPR decoding at 2 a.m.: **thank you.** Massively. Sincerely. Slightly awestruck.
 
 We just relay the bytes. You make them exist.
+
+---
+
+## Third-Party Software
+
+This feeder itself is released under the [MIT License](LICENSE). It depends on, and interoperates with, the following third-party software, each of which is governed by its own license:
+
+| Component | Role | License |
+|---|---|---|
+| [readsb](https://github.com/wiedehopf/readsb) (wiedehopf fork) | ADS-B decoder that produces `aircraft.json` | GNU GPL — see upstream repository |
+| [Mictronics readsb](https://github.com/Mictronics/readsb) | Original readsb that wiedehopf's fork descends from | GNU GPL — see upstream repository |
+| [requests](https://github.com/psf/requests) | HTTP client used by the feeder | Apache License 2.0 |
+| [python-dotenv](https://github.com/theskumar/python-dotenv) | `.env` file loader | BSD 3-Clause |
+
+The feeder does **not** redistribute or bundle readsb; the optional `feeder/install_readsb.sh` is a thin wrapper that fetches and runs the upstream installer maintained by wiedehopf at install time. All third-party copyrights and licenses remain with their respective authors.
+
+---
+
+## License
+
+This project is licensed under the [MIT License](LICENSE). See the `LICENSE` file in the repository root for the full text.
 
 ---
 
