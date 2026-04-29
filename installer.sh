@@ -1,4 +1,8 @@
 #!/bin/bash
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025-2026 Dataero ADSB
+# See LICENSE in the project root for full terms.
+
 set -e
 
 INSTALL_DIR="/usr/local/dataero-adsb-feeder"
