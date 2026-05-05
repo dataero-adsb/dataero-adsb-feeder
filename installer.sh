@@ -82,54 +82,61 @@ if [ -d "$VENV_DIR" ] && [ ! -x "$VENV_DIR/bin/pip" ]; then
     sudo rm -rf "$VENV_DIR"
 fi
 
-# Check for readsb service. Use `systemctl cat` rather than `list-units --all`:
-# the latter also lists orphan "not-found" entries pulled in as dependencies or
-# left behind by half-removed packages, producing a false positive that then
-# fails downstream with "Unit readsb.service not found" when we try to start it.
-if ! systemctl cat readsb.service &> /dev/null; then
-    echo "❌ readsb.service is not installed."
+# Detect the ADS-B data source. Either readsb or dump1090-fa produces an
+# aircraft.json the feeder can POST verbatim — both come from the same
+# wiedehopf lineage and emit the same JSON schema, just at different paths.
+# PiAware ships dump1090-fa rather than readsb, and the two cannot coexist
+# on a single SDR, so we adapt to whichever decoder is already present
+# instead of forcing a readsb install that would fight dump1090-fa for the
+# dongle. Prefer readsb when both are installed (it's our canonical default).
+#
+# `systemctl cat` (rather than `list-units --all`) only succeeds when a real
+# unit file exists on disk, avoiding false positives from orphan unit
+# references left behind by half-removed packages.
+DATA_SOURCE_UNIT=""
+DATA_SOURCE_FILE=""
+
+if systemctl cat readsb.service &> /dev/null; then
+    DATA_SOURCE_UNIT="readsb.service"
+    DATA_SOURCE_FILE="/run/readsb/aircraft.json"
+    echo "✅ Detected readsb.service as the data source."
+elif systemctl cat dump1090-fa.service &> /dev/null; then
+    DATA_SOURCE_UNIT="dump1090-fa.service"
+    DATA_SOURCE_FILE="/run/dump1090-fa/aircraft.json"
+    echo "✅ Detected dump1090-fa.service (PiAware) as the data source."
+else
+    echo "❌ No ADS-B decoder service found (neither readsb nor dump1090-fa)."
     read -p "Do you want to automatically install readsb? (yes/no): " install_readsb
     if [[ "$install_readsb" == "yes" ]]; then
         echo "🔄 Installing readsb..."
         bash "$(dirname "$0")/feeder/install_readsb.sh"
 
-        # Verify installation was successful
-        if systemctl list-units --type=service --all | grep -q "readsb.service"; then
+        if systemctl cat readsb.service &> /dev/null; then
+            DATA_SOURCE_UNIT="readsb.service"
+            DATA_SOURCE_FILE="/run/readsb/aircraft.json"
             echo "✅ readsb.service is now installed."
-            if ! systemctl is-active --quiet readsb.service; then
-                echo "⚠️ readsb.service is not running. Attempting to start it..."
-                sudo systemctl start readsb.service
-                if systemctl is-active --quiet readsb.service; then
-                    echo "✅ readsb.service started successfully."
-                else
-                    echo "❌ Failed to start readsb.service. Please start it manually."
-                    exit 1
-                fi
-            else
-                echo "✅ readsb.service is running."
-            fi
         else
             echo "❌ Failed to install readsb.service. Please install it manually."
             exit 1
         fi
     else
-        echo "❌ readsb.service is required for this application to function. Please install it and run this script again."
+        echo "❌ A decoder (readsb or dump1090-fa) is required for this feeder to function."
+        exit 1
+    fi
+fi
+
+# Ensure the chosen decoder is running.
+if ! systemctl is-active --quiet "$DATA_SOURCE_UNIT"; then
+    echo "⚠️ $DATA_SOURCE_UNIT is not running. Attempting to start it..."
+    sudo systemctl start "$DATA_SOURCE_UNIT"
+    if systemctl is-active --quiet "$DATA_SOURCE_UNIT"; then
+        echo "✅ $DATA_SOURCE_UNIT started successfully."
+    else
+        echo "❌ Failed to start $DATA_SOURCE_UNIT. Please start it manually."
         exit 1
     fi
 else
-    echo "✅ readsb.service is installed."
-    if ! systemctl is-active --quiet readsb.service; then
-        echo "⚠️ readsb.service is not running. Attempting to start it..."
-        sudo systemctl start readsb.service
-        if systemctl is-active --quiet readsb.service; then
-            echo "✅ readsb.service started successfully."
-        else
-            echo "❌ Failed to start readsb.service. Please start it manually."
-            exit 1
-        fi
-    else
-        echo "✅ readsb.service is already running."
-    fi
+    echo "✅ $DATA_SOURCE_UNIT is already running."
 fi
 
 # Create installation directory
@@ -189,16 +196,21 @@ if [ -z "$API_KEY" ]; then
     read -p "🔑 Enter your Dataero API key: " API_KEY
 fi
 
-echo "API_KEY=$API_KEY" | sudo tee "$INSTALL_DIR/.env" > /dev/null
-echo "✅ API key saved."
+# Persist API key plus the detected aircraft.json path. Writing READSB_DATA
+# explicitly (rather than relying on main.py's default) is what lets the
+# feeder transparently consume dump1090-fa's output on PiAware without any
+# user intervention.
+echo "API_KEY=$API_KEY"             | sudo tee    "$INSTALL_DIR/.env" > /dev/null
+echo "READSB_DATA=$DATA_SOURCE_FILE" | sudo tee -a "$INSTALL_DIR/.env" > /dev/null
+echo "✅ Configuration saved (API key + data source: $DATA_SOURCE_FILE)."
 
 # Create systemd service file
 echo "🛠️ Creating systemd service..."
 sudo bash -c "cat > $SERVICE_FILE" <<EOL
 [Unit]
 Description=Dataero ADS-B Feeder Service
-Requires=readsb.service
-After=readsb.service
+Requires=$DATA_SOURCE_UNIT
+After=$DATA_SOURCE_UNIT
 
 [Service]
 WorkingDirectory=$INSTALL_DIR
@@ -243,9 +255,9 @@ echo "✅ Service is active."
 #    network reachability, TLS, and the API key in a single round-trip.
 #    curl exits non-zero only on transport failures; 4xx/5xx are reported
 #    via the HTTP status code, which we inspect explicitly below.
-READSB_DATA_FILE="${READSB_DATA:-/run/readsb/aircraft.json}"
+READSB_DATA_FILE="$DATA_SOURCE_FILE"
 if [ ! -r "$READSB_DATA_FILE" ]; then
-    echo "⚠️  $READSB_DATA_FILE is not readable yet — readsb may still be warming up."
+    echo "⚠️  $READSB_DATA_FILE is not readable yet — $DATA_SOURCE_UNIT may still be warming up."
     echo "   Skipping live API test. Re-check later with:"
     echo "     sudo journalctl -u dataero-feeder.service -f"
 else
