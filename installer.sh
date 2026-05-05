@@ -243,8 +243,12 @@ if [ -n "$EXISTING_KEY" ]; then
         MASKED_KEY="(short key)"
     fi
     echo "🔑 An existing API key was found in $INSTALL_DIR/.env: $MASKED_KEY ($KEY_LEN chars)"
-    read -p "🔑 Keep this key? (yes/no): " KEEP_KEY
-    if [[ "$KEEP_KEY" =~ ^(y|yes|Y|YES)$ ]]; then
+    # Default to keeping the key on bare Enter. The previous behaviour treated
+    # empty input as "no" and then prompted again for a fresh key — a second
+    # Enter there silently wrote an empty API_KEY to .env and the feeder
+    # failed auth on the very first POST. "(Y/n)" signals the default.
+    read -p "🔑 Keep this key? (Y/n): " KEEP_KEY
+    if [[ -z "$KEEP_KEY" || "$KEEP_KEY" =~ ^(y|yes|Y|YES)$ ]]; then
         API_KEY="$EXISTING_KEY"
         echo "✅ Reusing existing API key."
     fi
