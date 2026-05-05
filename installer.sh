@@ -82,30 +82,67 @@ if [ -d "$VENV_DIR" ] && [ ! -x "$VENV_DIR/bin/pip" ]; then
     sudo rm -rf "$VENV_DIR"
 fi
 
-# Detect the ADS-B data source. Either readsb or dump1090-fa produces an
-# aircraft.json the feeder can POST verbatim — both come from the same
-# wiedehopf lineage and emit the same JSON schema, just at different paths.
-# PiAware ships dump1090-fa rather than readsb, and the two cannot coexist
-# on a single SDR, so we adapt to whichever decoder is already present
-# instead of forcing a readsb install that would fight dump1090-fa for the
-# dongle. Prefer readsb when both are installed (it's our canonical default).
+# Detect the ADS-B data source. The feeder is a passive read-only consumer
+# of an aircraft.json — readsb and the various dump1090 forks all emit the
+# same wiedehopf-format file, so any of them works. The detection has two
+# stages:
 #
-# `systemctl cat` (rather than `list-units --all`) only succeeds when a real
-# unit file exists on disk, avoiding false positives from orphan unit
-# references left behind by half-removed packages.
+#   1. Probe a known list of decoder systemd units in priority order.
+#      `systemctl cat` (rather than `list-units --all`) only succeeds when a
+#      real unit file exists on disk, avoiding false positives from orphan
+#      unit references left behind by half-removed packages.
+#
+#   2. Safety net: if no known unit matched but something on the host is
+#      already producing /run/<dir>/aircraft.json, consume that instead of
+#      offering to install readsb. This is what keeps us from ever causing
+#      an SDR collision on a host that already has an unfamiliar decoder
+#      (e.g. dump1090-mutability on legacy Raspbian, or a hand-rolled build
+#      with a non-standard unit name). Co-existing with FlightAware,
+#      Flightradar24, ADSBExchange, etc. is fine — they're all just
+#      additional readers of the same file.
+#
+# Only when both stages find nothing do we offer to install readsb.
 DATA_SOURCE_UNIT=""
 DATA_SOURCE_FILE=""
 
-if systemctl cat readsb.service &> /dev/null; then
-    DATA_SOURCE_UNIT="readsb.service"
-    DATA_SOURCE_FILE="/run/readsb/aircraft.json"
-    echo "✅ Detected readsb.service as the data source."
-elif systemctl cat dump1090-fa.service &> /dev/null; then
-    DATA_SOURCE_UNIT="dump1090-fa.service"
-    DATA_SOURCE_FILE="/run/dump1090-fa/aircraft.json"
-    echo "✅ Detected dump1090-fa.service (PiAware) as the data source."
-else
-    echo "❌ No ADS-B decoder service found (neither readsb nor dump1090-fa)."
+# Stage 1: known decoder units, in preference order. Path convention is
+# /run/<unit-basename>/aircraft.json for every decoder we've seen in the wild.
+KNOWN_DECODERS=(readsb dump1090-fa dump1090-mutability dump1090)
+for d in "${KNOWN_DECODERS[@]}"; do
+    if systemctl cat "${d}.service" &> /dev/null; then
+        DATA_SOURCE_UNIT="${d}.service"
+        DATA_SOURCE_FILE="/run/${d}/aircraft.json"
+        echo "✅ Detected ${d}.service as the data source."
+        break
+    fi
+done
+
+# Stage 2: any /run/*/aircraft.json producer, even if its unit name is not
+# one we recognise. We try to map the directory back to a systemd unit so
+# we can still bind Requires=/After=; if the unit name doesn't match the
+# directory we just skip the ordering and rely on Restart=always to recover
+# if the feeder loses the file briefly.
+if [ -z "$DATA_SOURCE_FILE" ]; then
+    for f in /run/*/aircraft.json; do
+        [ -e "$f" ] || continue
+        candidate_dir=$(basename "$(dirname "$f")")
+        DATA_SOURCE_FILE="$f"
+        if systemctl cat "${candidate_dir}.service" &> /dev/null; then
+            DATA_SOURCE_UNIT="${candidate_dir}.service"
+            echo "✅ Detected an existing decoder at $f (unit: $DATA_SOURCE_UNIT)."
+        else
+            echo "✅ Detected an existing decoder at $f."
+            echo "   ℹ️  No matching systemd unit named ${candidate_dir}.service —"
+            echo "      skipping Requires=/After= ordering for the feeder service."
+        fi
+        break
+    done
+fi
+
+# Stage 3: nothing found anywhere. Now it's safe to offer readsb because we
+# know we won't be installing it on top of an existing SDR consumer.
+if [ -z "$DATA_SOURCE_FILE" ]; then
+    echo "❌ No ADS-B decoder service found, and no /run/*/aircraft.json on disk."
     read -p "Do you want to automatically install readsb? (yes/no): " install_readsb
     if [[ "$install_readsb" == "yes" ]]; then
         echo "🔄 Installing readsb..."
@@ -120,23 +157,29 @@ else
             exit 1
         fi
     else
-        echo "❌ A decoder (readsb or dump1090-fa) is required for this feeder to function."
+        echo "❌ A decoder (readsb, dump1090-fa, dump1090-mutability, or compatible)"
+        echo "   is required for this feeder to function."
         exit 1
     fi
 fi
 
-# Ensure the chosen decoder is running.
-if ! systemctl is-active --quiet "$DATA_SOURCE_UNIT"; then
-    echo "⚠️ $DATA_SOURCE_UNIT is not running. Attempting to start it..."
-    sudo systemctl start "$DATA_SOURCE_UNIT"
-    if systemctl is-active --quiet "$DATA_SOURCE_UNIT"; then
-        echo "✅ $DATA_SOURCE_UNIT started successfully."
+# Ensure the chosen decoder is running — but only when we know its unit name.
+# In the unknown-unit case the producer is already writing aircraft.json by
+# the time we got here (Stage 2 confirmed the file exists), so there's
+# nothing for us to start.
+if [ -n "$DATA_SOURCE_UNIT" ]; then
+    if ! systemctl is-active --quiet "$DATA_SOURCE_UNIT"; then
+        echo "⚠️ $DATA_SOURCE_UNIT is not running. Attempting to start it..."
+        sudo systemctl start "$DATA_SOURCE_UNIT"
+        if systemctl is-active --quiet "$DATA_SOURCE_UNIT"; then
+            echo "✅ $DATA_SOURCE_UNIT started successfully."
+        else
+            echo "❌ Failed to start $DATA_SOURCE_UNIT. Please start it manually."
+            exit 1
+        fi
     else
-        echo "❌ Failed to start $DATA_SOURCE_UNIT. Please start it manually."
-        exit 1
+        echo "✅ $DATA_SOURCE_UNIT is already running."
     fi
-else
-    echo "✅ $DATA_SOURCE_UNIT is already running."
 fi
 
 # Create installation directory
@@ -204,13 +247,21 @@ echo "API_KEY=$API_KEY"             | sudo tee    "$INSTALL_DIR/.env" > /dev/nul
 echo "READSB_DATA=$DATA_SOURCE_FILE" | sudo tee -a "$INSTALL_DIR/.env" > /dev/null
 echo "✅ Configuration saved (API key + data source: $DATA_SOURCE_FILE)."
 
-# Create systemd service file
+# Create systemd service file. Requires=/After= are only emitted when we
+# matched a known systemd unit; in the unknown-unit safety-net case we omit
+# them and rely on Restart=always plus main.py's tolerance of a missing
+# aircraft.json so the feeder catches up once its decoder is producing.
+UNIT_DEPS=""
+if [ -n "$DATA_SOURCE_UNIT" ]; then
+    UNIT_DEPS="Requires=$DATA_SOURCE_UNIT
+After=$DATA_SOURCE_UNIT"
+fi
+
 echo "🛠️ Creating systemd service..."
 sudo bash -c "cat > $SERVICE_FILE" <<EOL
 [Unit]
 Description=Dataero ADS-B Feeder Service
-Requires=$DATA_SOURCE_UNIT
-After=$DATA_SOURCE_UNIT
+$UNIT_DEPS
 
 [Service]
 WorkingDirectory=$INSTALL_DIR
@@ -257,7 +308,7 @@ echo "✅ Service is active."
 #    via the HTTP status code, which we inspect explicitly below.
 READSB_DATA_FILE="$DATA_SOURCE_FILE"
 if [ ! -r "$READSB_DATA_FILE" ]; then
-    echo "⚠️  $READSB_DATA_FILE is not readable yet — $DATA_SOURCE_UNIT may still be warming up."
+    echo "⚠️  $READSB_DATA_FILE is not readable yet — ${DATA_SOURCE_UNIT:-the decoder} may still be warming up."
     echo "   Skipping live API test. Re-check later with:"
     echo "     sudo journalctl -u dataero-feeder.service -f"
 else
