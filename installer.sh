@@ -49,8 +49,25 @@ dpkg -s "$VENV_PKG" &> /dev/null      || MISSING_PKGS+=("$VENV_PKG")
 if [ ${#MISSING_PKGS[@]} -gt 0 ]; then
     echo "⚠️  Missing Python prerequisites: ${MISSING_PKGS[*]}"
     echo "📦 Installing via apt-get..."
-    sudo apt-get update
-    sudo apt-get install -y "${MISSING_PKGS[@]}"
+    # Tolerate a partial `apt-get update` failure. A single broken or EOL
+    # repository (e.g. FlightAware's retired Raspbian Buster mirror) returns
+    # non-zero, but apt still refreshes the cache for the working repos. Under
+    # `set -e` the bare command would abort the installer even though the
+    # packages we need may be perfectly reachable from a healthy mirror.
+    if ! sudo apt-get update; then
+        echo "⚠️  apt-get update reported errors (likely a stale or end-of-life"
+        echo "    repository in /etc/apt/sources.list.d/). Attempting the install"
+        echo "    anyway — if our packages are still reachable, this will succeed."
+    fi
+    if ! sudo apt-get install -y "${MISSING_PKGS[@]}"; then
+        echo "❌ Failed to install: ${MISSING_PKGS[*]}"
+        echo "   This usually means your apt sources are unhealthy. Common causes:"
+        echo "     • The OS release is end-of-life (e.g. Raspbian Buster) and its"
+        echo "       repositories have been retired."
+        echo "     • A third-party mirror in /etc/apt/sources.list.d/ no longer exists."
+        echo "   Fix the apt sources (or upgrade the OS), then re-run this installer."
+        exit 1
+    fi
     python3 -m pip --version &> /dev/null || { echo "❌ pip still unavailable after install."; exit 1; }
     dpkg -s "$VENV_PKG" &> /dev/null      || { echo "❌ $VENV_PKG still not installed."; exit 1; }
     echo "✅ Python prerequisites installed."
@@ -65,8 +82,11 @@ if [ -d "$VENV_DIR" ] && [ ! -x "$VENV_DIR/bin/pip" ]; then
     sudo rm -rf "$VENV_DIR"
 fi
 
-# Check for readsb service
-if ! systemctl list-units --type=service --all | grep -q "readsb.service"; then
+# Check for readsb service. Use `systemctl cat` rather than `list-units --all`:
+# the latter also lists orphan "not-found" entries pulled in as dependencies or
+# left behind by half-removed packages, producing a false positive that then
+# fails downstream with "Unit readsb.service not found" when we try to start it.
+if ! systemctl cat readsb.service &> /dev/null; then
     echo "❌ readsb.service is not installed."
     read -p "Do you want to automatically install readsb? (yes/no): " install_readsb
     if [[ "$install_readsb" == "yes" ]]; then
