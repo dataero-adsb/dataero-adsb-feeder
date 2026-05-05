@@ -39,6 +39,22 @@ fi
 PY_VER=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
 VENV_PKG="python${PY_VER}-venv"
 
+# Floor at Python 3.7 — that's the oldest version for which our pinned deps
+# (requests, python-dotenv) still publish wheels. Anything older is on a
+# long-EOL OS (Stretch / Buster pre-3.7) and would only fail later inside
+# pip with an opaque "no matching distribution" message; better to tell the
+# operator clearly here.
+PY_MAJOR="${PY_VER%.*}"
+PY_MINOR="${PY_VER#*.}"
+if [ "$PY_MAJOR" -lt 3 ] || { [ "$PY_MAJOR" -eq 3 ] && [ "$PY_MINOR" -lt 7 ]; }; then
+    echo "❌ Python $PY_VER is too old. The Dataero feeder needs Python 3.7 or newer."
+    echo "   Your OS release is almost certainly past end-of-life. Recommended fix:"
+    echo "   reflash with a current image (e.g. PiAware 8 or current Raspberry Pi OS)"
+    echo "   which ships Python 3.11+. Manually upgrading Python in place on an EOL"
+    echo "   distribution rarely ends well."
+    exit 1
+fi
+
 # Phase 2: check pip and the versioned venv package. dpkg -s is authoritative;
 # `python3 -m venv --help` gives false positives because the stub is part of
 # stdlib and succeeds even when ensurepip's wheels are missing.
