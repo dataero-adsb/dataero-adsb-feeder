@@ -7,6 +7,7 @@ import json
 import requests
 import os
 import socket
+import threading
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
@@ -17,6 +18,28 @@ API_KEY = os.getenv("API_KEY", "")
 API_URL = "https://radar.dataero.eu/api/v1/messages"
 HEARTBEAT_URL = "https://radar.dataero.eu/api/v1/heartbeat"
 READSB_DATA = os.getenv("READSB_DATA", "/run/readsb/aircraft.json")
+# Feed mode. In "beast" mode this process does NOT POST aircraft.json — instead
+# a background thread forwards the decoder's local Beast output straight to the
+# Dataero Beast server, and the main loop's only other job is the heartbeat. The
+# raw Beast protocol carries no API key, so the server attributes the stream by
+# matching its public source IP to the account; the heartbeat (bearer token ->
+# public IP) is what maintains that mapping. Hence the heartbeat must keep firing
+# in Beast mode. Any other value keeps the JSON-POST behaviour, which works
+# everywhere.
+FEED_MODE = os.getenv("FEED_MODE", "json").strip().lower()
+BEAST_MODE = FEED_MODE == "beast"
+# Beast-mode forwarding endpoints. In Beast mode this process is a plain TCP byte
+# pump: it connects to the decoder's LOCAL Beast output port as just another
+# read-only consumer (exactly like the FlightAware / FR24 / ADSBExchange feed
+# clients) and forwards the raw stream to the Dataero Beast server. Because we
+# never touch the decoder's own config, any other feeder reading the same port
+# is unaffected. The destination mirrors the constants in installer.sh and is
+# intentionally not env-overridable (same policy as API_URL); 30005 is the
+# near-universal readsb/dump1090 beast_out port.
+BEAST_SERVER = "adsb.dataero.eu"
+BEAST_PORT = 30005
+BEAST_SRC_HOST = "127.0.0.1"
+BEAST_SRC_PORT = 30005
 DEBUG = os.getenv("DEBUG", "FALSE").upper() == "TRUE"
 DEBUG_LOG = "/var/log/dataero-adsb-feeder.log" if DEBUG else None
 
@@ -128,11 +151,67 @@ def send_heartbeat():
         log_debug(f"Heartbeat error: {e}")
         print(f"heartbeat error: {e}", flush=True)
 
+def beast_forward_loop():
+    """Beast mode only: pipe the decoder's local Beast output to the Dataero
+    Beast server, reconnecting with backoff whenever either side drops.
+
+    We connect to the decoder's beast_out port purely as a read-only consumer —
+    the same way every other feed client (FlightAware, FR24, ADSBExchange) does —
+    so we never modify the decoder's configuration and never disturb any other
+    feeder already reading that port. Runs in its own daemon thread; the
+    heartbeat keeps firing from the main loop because the raw Beast protocol
+    carries no API key (the server binds our account to this device's public IP
+    via the heartbeat)."""
+    backoff = 1
+    while True:
+        try:
+            src = socket.create_connection(
+                (BEAST_SRC_HOST, BEAST_SRC_PORT), timeout=REQUEST_TIMEOUT[0]
+            )
+            try:
+                dst = socket.create_connection(
+                    (BEAST_SERVER, BEAST_PORT), timeout=REQUEST_TIMEOUT[0]
+                )
+            except Exception:
+                src.close()
+                raise
+            log_debug(
+                f"Beast forward connected: {BEAST_SRC_HOST}:{BEAST_SRC_PORT} "
+                f"-> {BEAST_SERVER}:{BEAST_PORT}"
+            )
+            backoff = 1
+            with src, dst:
+                # Block on the decoder side — a short timeout would just churn
+                # CPU in quiet airspace. A dead remote surfaces on sendall().
+                src.settimeout(None)
+                while True:
+                    chunk = src.recv(65536)
+                    if not chunk:
+                        log_debug("Beast forward: decoder closed; reconnecting")
+                        break
+                    dst.sendall(chunk)
+        except Exception as e:
+            log_debug(f"Beast forward error: {e}")
+            print(f"beast forward error: {e}", flush=True)
+        # Backoff before reconnecting; capped so a long outage retries calmly.
+        time.sleep(backoff)
+        backoff = min(backoff * 2, 30)
+
 if __name__ == "__main__":
-    print(f"dataero-adsb-feeder running; messages={API_URL} heartbeat={HEARTBEAT_URL}", flush=True)
+    if BEAST_MODE:
+        print(
+            f"dataero-adsb-feeder running in BEAST mode; forwarding the decoder's "
+            f"Beast stream {BEAST_SRC_HOST}:{BEAST_SRC_PORT} -> {BEAST_SERVER}:{BEAST_PORT}, "
+            f"heartbeat={HEARTBEAT_URL}",
+            flush=True,
+        )
+        threading.Thread(target=beast_forward_loop, daemon=True).start()
+    else:
+        print(f"dataero-adsb-feeder running; messages={API_URL} heartbeat={HEARTBEAT_URL}", flush=True)
     last_heartbeat = 0.0
     while True:
-        send_data()
+        if not BEAST_MODE:
+            send_data()
         now = time.time()
         if now - last_heartbeat >= HEARTBEAT_INTERVAL_SECONDS:
             send_heartbeat()
