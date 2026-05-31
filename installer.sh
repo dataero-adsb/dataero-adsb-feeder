@@ -9,6 +9,16 @@ INSTALL_DIR="/usr/local/dataero-adsb-feeder"
 VENV_DIR="$INSTALL_DIR/.venv"
 SERVICE_FILE="/etc/systemd/system/dataero-feeder.service"
 
+# Dataero Beast ingestion endpoint. In Beast mode the Python feeder forwards the
+# decoder's LOCAL Beast output here as a plain TCP byte pump, connecting to the
+# decoder's beast_out port purely as a read-only consumer (like the FlightAware /
+# FR24 / ADSBExchange feed clients) — so it never edits the decoder's own config
+# and never disturbs any other feeder. BEAST_SRC_PORT is the decoder's local
+# beast_out port (30005 is the near-universal readsb/dump1090 default).
+BEAST_SERVER="adsb.dataero.eu"
+BEAST_PORT="30005"
+BEAST_SRC_PORT="30005"
+
 echo "🚀 Starting Dataero ADS-B Feeder Installer..."
 echo ""
 echo "   ✈️  Before we begin: a tip of the hat to the readsb project"
@@ -198,6 +208,62 @@ if [ -n "$DATA_SOURCE_UNIT" ]; then
     fi
 fi
 
+# ──────────────────────────────────────────────────────────────────────────
+# Feed mode selection (interactive).
+#
+# Two ways the data reaches Dataero — the operator chooses:
+#
+#   • Beast  — feeder/main.py runs a small forwarder that connects to the
+#     decoder's LOCAL Beast output port and pipes the raw Beast stream to the
+#     Dataero Beast server at ${BEAST_SERVER}:${BEAST_PORT}. It connects as just
+#     another read-only consumer of that port — exactly like the FlightAware /
+#     FR24 / ADSBExchange feed clients do — so we NEVER edit the decoder's own
+#     config and never disturb any other feeder already reading it. This is the
+#     load-bearing "must not interfere with other Beast/aircraft.json consumers"
+#     property: there is no decoder-side change to roll back.
+#
+#   • HTTPS  — feeder/main.py POSTs aircraft.json over HTTPS. Works everywhere.
+#
+# Both modes need the API key (prompted for below): HTTPS authenticates each
+# POST with it; Beast carries no key in the raw protocol, so the server binds
+# account -> public IP via the heartbeat (bearer token -> IP) that main.py keeps
+# firing in either mode.
+# ──────────────────────────────────────────────────────────────────────────
+echo ""
+echo "📡 How should this device feed Dataero?"
+echo "   1) Beast  — forward the decoder's Beast stream to ${BEAST_SERVER}:${BEAST_PORT} (lighter, preferred)"
+echo "   2) HTTPS  — POST aircraft.json over HTTPS (works on any decoder)"
+read -p "Select feed mode [1/2] (default 1): " MODE_CHOICE
+
+case "$MODE_CHOICE" in
+    2|https|HTTPS|json|JSON) FEED_MODE="json" ;;
+    *)                       FEED_MODE="beast" ;;
+esac
+
+if [ "$FEED_MODE" = "beast" ]; then
+    echo "📡 Beast mode selected — the feeder will forward to ${BEAST_SERVER}:${BEAST_PORT}."
+
+    # Soft probe of the decoder's LOCAL Beast output. Informational only: the
+    # forwarder in main.py reconnects on its own, so we proceed regardless. A
+    # missing local port usually just means the decoder is still warming up or
+    # exposes beast_out on a non-default port.
+    if timeout 5 bash -c "exec 3<>/dev/tcp/127.0.0.1/${BEAST_SRC_PORT}" 2>/dev/null; then
+        echo "✅ Decoder Beast output reachable on 127.0.0.1:${BEAST_SRC_PORT}."
+    else
+        echo "⚠️  No Beast output on 127.0.0.1:${BEAST_SRC_PORT} yet — the decoder may still be"
+        echo "    warming up (or exposes beast_out on a different port). The forwarder will keep retrying."
+    fi
+
+    # Soft probe of the remote — informational only; the forwarder retries.
+    if timeout 5 bash -c "exec 3<>/dev/tcp/${BEAST_SERVER}/${BEAST_PORT}" 2>/dev/null; then
+        echo "✅ ${BEAST_SERVER}:${BEAST_PORT} is reachable from this device."
+    else
+        echo "⚠️  Could not reach ${BEAST_SERVER}:${BEAST_PORT} right now — the forwarder will keep retrying."
+    fi
+else
+    echo "🌐 HTTPS mode selected — the feeder will POST aircraft.json to radar.dataero.eu."
+fi
+
 # Create installation directory
 if [ ! -d "$INSTALL_DIR" ]; then
     echo "📁 Creating installation directory at $INSTALL_DIR..."
@@ -265,7 +331,11 @@ fi
 # user intervention.
 echo "API_KEY=$API_KEY"             | sudo tee    "$INSTALL_DIR/.env" > /dev/null
 echo "READSB_DATA=$DATA_SOURCE_FILE" | sudo tee -a "$INSTALL_DIR/.env" > /dev/null
-echo "✅ Configuration saved (API key + data source: $DATA_SOURCE_FILE)."
+# FEED_MODE selects what main.py does: "beast" => heartbeat only (the decoder
+# pushes Beast itself); "json" => POST aircraft.json (works on any decoder).
+# READSB_DATA is still written either way so a fallback to JSON needs no rewrite.
+echo "FEED_MODE=$FEED_MODE"          | sudo tee -a "$INSTALL_DIR/.env" > /dev/null
+echo "✅ Configuration saved (API key, data source: $DATA_SOURCE_FILE, feed mode: $FEED_MODE)."
 
 # Create systemd service file. Requires=/After= are only emitted when we
 # matched a known systemd unit; in the unknown-unit safety-net case we omit
@@ -322,32 +392,59 @@ if ! systemctl is-active --quiet dataero-feeder.service; then
 fi
 echo "✅ Service is active."
 
-# 2. Live API test: send one real payload from this installer to validate
-#    network reachability, TLS, and the API key in a single round-trip.
-#    curl exits non-zero only on transport failures; 4xx/5xx are reported
-#    via the HTTP status code, which we inspect explicitly below.
-READSB_DATA_FILE="$DATA_SOURCE_FILE"
-if [ ! -r "$READSB_DATA_FILE" ]; then
-    echo "⚠️  $READSB_DATA_FILE is not readable yet — ${DATA_SOURCE_UNIT:-the decoder} may still be warming up."
-    echo "   Skipping live API test. Re-check later with:"
-    echo "     sudo journalctl -u dataero-feeder.service -f"
+# 2. Live API test. What we exercise depends on the feed mode:
+#      - beast: POST a heartbeat. Aircraft data does NOT flow through this POST
+#        in Beast mode (the feeder's Beast forwarder carries it as a raw TCP
+#        stream), so the meaningful client-side check is that the heartbeat —
+#        which binds our API key to this device's public IP, the key the Beast
+#        server attributes by — is accepted.
+#      - json:  POST one real aircraft.json payload, exercising the exact path
+#        the feeder uses.
+#    curl exits non-zero only on transport failures; 4xx/5xx come back as the
+#    HTTP status code, inspected explicitly below.
+if ! command -v curl &> /dev/null; then
+    echo "📦 Installing curl for the API test..."
+    sudo apt-get install -y curl
+fi
+
+RUN_API_TEST="yes"
+CURL_DATA=()
+if [ "$FEED_MODE" = "beast" ]; then
+    TEST_URL="https://radar.dataero.eu/api/v1/heartbeat"
+    TEST_LABEL="heartbeat (Beast mode: aircraft data flows via the feeder's Beast forwarder, not this POST)"
+    CURL_DATA=(--data "{\"timestamp\": $(date +%s)}")
 else
-    if ! command -v curl &> /dev/null; then
-        echo "📦 Installing curl for the API test..."
-        sudo apt-get install -y curl
+    TEST_URL="https://radar.dataero.eu/api/v1/messages"
+    TEST_LABEL="messages payload"
+    READSB_DATA_FILE="$DATA_SOURCE_FILE"
+    if [ ! -r "$READSB_DATA_FILE" ]; then
+        echo "⚠️  $READSB_DATA_FILE is not readable yet — ${DATA_SOURCE_UNIT:-the decoder} may still be warming up."
+        echo "   Skipping live API test. Re-check later with:"
+        echo "     sudo journalctl -u dataero-feeder.service -f"
+        RUN_API_TEST="no"
+    else
+        CURL_DATA=(--data @"$READSB_DATA_FILE")
     fi
-    echo "📡 Sending a test payload to https://radar.dataero.eu/api/v1/messages ..."
+fi
+
+if [ "$RUN_API_TEST" = "yes" ]; then
+    echo "📡 Sending a test $TEST_LABEL to $TEST_URL ..."
     RESP_BODY=$(mktemp)
     HTTP_CODE=$(curl -sS -o "$RESP_BODY" -w "%{http_code}" \
         -X POST \
         -H "Authorization: Bearer $API_KEY" \
         -H "Content-Type: application/json" \
         -H "X-Target-Host: radar.dataero.eu" \
-        --data @"$READSB_DATA_FILE" \
-        "https://radar.dataero.eu/api/v1/messages" || echo "000")
+        "${CURL_DATA[@]}" \
+        "$TEST_URL" || echo "000")
     case "$HTTP_CODE" in
         2*)
-            echo "✅ API accepted the upload (HTTP $HTTP_CODE). Data is flowing to radar.dataero.eu."
+            if [ "$FEED_MODE" = "beast" ]; then
+                echo "✅ API accepted the heartbeat (HTTP $HTTP_CODE). This device is registered; the feeder is forwarding Beast to ${BEAST_SERVER}:${BEAST_PORT}."
+                echo "   ℹ️  Confirm the stream is attributed on the Dataero server side (feeder list / message counter)."
+            else
+                echo "✅ API accepted the upload (HTTP $HTTP_CODE). Data is flowing to radar.dataero.eu."
+            fi
             ;;
         401|403)
             echo "❌ API rejected your credentials (HTTP $HTTP_CODE)."
@@ -365,7 +462,7 @@ else
         *)
             echo "⚠️  Unexpected API response (HTTP $HTTP_CODE). Response body:"
             sed 's/^/     /' "$RESP_BODY"
-            echo "   The service is running; monitor logs to confirm uploads continue:"
+            echo "   The service is running; monitor logs to confirm it continues:"
             echo "     sudo journalctl -u dataero-feeder.service -f"
             ;;
     esac
@@ -380,7 +477,11 @@ if ! systemctl is-active --quiet dataero-feeder.service; then
 fi
 
 echo ""
-echo "🎉 Installation complete. Your feeder is sending data to radar.dataero.eu."
+if [ "$FEED_MODE" = "beast" ]; then
+    echo "🎉 Installation complete. The feeder is forwarding ${DATA_SOURCE_UNIT:-the decoder}'s Beast stream to ${BEAST_SERVER}:${BEAST_PORT} and heartbeating radar.dataero.eu."
+else
+    echo "🎉 Installation complete. Your feeder is sending data to radar.dataero.eu."
+fi
 echo ""
 echo "   ✈️  Reminder: the bytes you're now relaying were lovingly decoded by"
 echo "      readsb (https://github.com/wiedehopf/readsb). If you ever bump"
