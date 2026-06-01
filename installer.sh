@@ -373,7 +373,7 @@ if [ "$FEED_MODE" = "reduce" ]; then
         fi
     fi
     HUB_HOST="${HUB_HOST:-adsb.dataero.eu}"
-    HUB_PORT="${HUB_PORT:-30004}"
+    HUB_PORT="${HUB_PORT:-30005}"
     REDUCE_INTERVAL="${REDUCE_INTERVAL:-0.25}"
     {
         echo "RECEIVER_UUID=$RECEIVER_UUID"
@@ -527,7 +527,7 @@ fi
 
 echo ""
 if [ "$FEED_MODE" = "reduce" ]; then
-    echo "🎉 Installation complete. readsb is forwarding reduced Beast (with UUID) to ${HUB_HOST:-adsb.dataero.eu}:${HUB_PORT:-30004}; the feeder heartbeats radar.dataero.eu."
+    echo "🎉 Installation complete. readsb is forwarding reduced Beast (with UUID) to ${HUB_HOST:-adsb.dataero.eu}:${HUB_PORT:-30005}; the feeder heartbeats radar.dataero.eu."
 elif [ "$FEED_MODE" = "beast" ]; then
     echo "🎉 Installation complete. The feeder is forwarding ${DATA_SOURCE_UNIT:-the decoder}'s Beast stream to ${BEAST_SERVER}:${BEAST_PORT} and heartbeating radar.dataero.eu."
 else

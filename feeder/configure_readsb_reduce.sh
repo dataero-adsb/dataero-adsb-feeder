@@ -19,7 +19,9 @@
 # Env / config:
 #   UUID            (required) feeder receiver id (from Dataero registration)
 #   HUB_HOST        aggregator host           (default: adsb.dataero.eu)
-#   HUB_PORT        aggregator beast-in port  (default: 30004)
+#   HUB_PORT        Dataero LB ingest port    (default: 30005 — the load
+#                   balancer receives Beast on 30005 and forwards to the
+#                   aggregator container's beast-input)
 #   REDUCE_INTERVAL position throttle seconds (default: 0.25 — readsb default)
 #   READSB_DEFAULT  config path               (default: /etc/default/readsb)
 #
@@ -28,7 +30,7 @@
 set -euo pipefail
 
 HUB_HOST="${HUB_HOST:-adsb.dataero.eu}"
-HUB_PORT="${HUB_PORT:-30004}"
+HUB_PORT="${HUB_PORT:-30005}"
 UUID="${UUID:?UUID required (feeder receiver id from Dataero registration)}"
 REDUCE_INTERVAL="${REDUCE_INTERVAL:-0.25}"
 READSB_DEFAULT="${READSB_DEFAULT:-/etc/default/readsb}"
