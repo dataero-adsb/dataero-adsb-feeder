@@ -231,16 +231,32 @@ fi
 # ──────────────────────────────────────────────────────────────────────────
 echo ""
 echo "📡 How should this device feed Dataero?"
-echo "   1) Beast  — forward the decoder's Beast stream to ${BEAST_SERVER}:${BEAST_PORT} (lighter, preferred)"
-echo "   2) HTTPS  — POST aircraft.json over HTTPS (works on any decoder)"
-read -p "Select feed mode [1/2] (default 1): " MODE_CHOICE
+if [ "$DATA_SOURCE_UNIT" = "readsb.service" ]; then
+    # Reduced Beast needs readsb's native beast_reduce_plus_out connector.
+    echo "   1) Reduced Beast (readsb native, with UUID) — edge-reduced, preferred"
+    echo "   2) Beast byte-pump — full-rate, read-only (any decoder)"
+    echo "   3) HTTPS — POST aircraft.json (any decoder)"
+    read -p "Select feed mode [1/2/3] (default 1): " MODE_CHOICE
+    case "$MODE_CHOICE" in
+        2|beast|BEAST)           FEED_MODE="beast" ;;
+        3|https|HTTPS|json|JSON) FEED_MODE="json" ;;
+        *)                       FEED_MODE="reduce" ;;
+    esac
+else
+    echo "   1) Beast byte-pump — full-rate, read-only (any decoder)"
+    echo "   2) HTTPS — POST aircraft.json (any decoder)"
+    echo "   (Reduced Beast needs readsb, which wasn't detected here.)"
+    read -p "Select feed mode [1/2] (default 1): " MODE_CHOICE
+    case "$MODE_CHOICE" in
+        2|https|HTTPS|json|JSON) FEED_MODE="json" ;;
+        *)                       FEED_MODE="beast" ;;
+    esac
+fi
 
-case "$MODE_CHOICE" in
-    2|https|HTTPS|json|JSON) FEED_MODE="json" ;;
-    *)                       FEED_MODE="beast" ;;
-esac
-
-if [ "$FEED_MODE" = "beast" ]; then
+if [ "$FEED_MODE" = "reduce" ]; then
+    echo "📡 Reduced-Beast mode — readsb will forward reduced Beast (with UUID) to the"
+    echo "   Dataero aggregator natively (configured right after the API key step)."
+elif [ "$FEED_MODE" = "beast" ]; then
     echo "📡 Beast mode selected — the feeder will forward to ${BEAST_SERVER}:${BEAST_PORT}."
 
     # Soft probe of the decoder's LOCAL Beast output. Informational only: the
@@ -300,6 +316,13 @@ if [ -f "$INSTALL_DIR/.env" ]; then
     EXISTING_KEY="${EXISTING_KEY%\'}"; EXISTING_KEY="${EXISTING_KEY#\'}"
 fi
 
+# Reuse an existing receiver UUID across reinstalls so the account binding stays
+# stable (read BEFORE .env is rewritten below).
+EXISTING_UUID=""
+if [ -f "$INSTALL_DIR/.env" ]; then
+    EXISTING_UUID=$(sudo grep -E '^RECEIVER_UUID=' "$INSTALL_DIR/.env" 2>/dev/null | head -1 | cut -d= -f2-)
+fi
+
 API_KEY=""
 if [ -n "$EXISTING_KEY" ]; then
     KEY_LEN=${#EXISTING_KEY}
@@ -336,6 +359,32 @@ echo "READSB_DATA=$DATA_SOURCE_FILE" | sudo tee -a "$INSTALL_DIR/.env" > /dev/nu
 # READSB_DATA is still written either way so a fallback to JSON needs no rewrite.
 echo "FEED_MODE=$FEED_MODE"          | sudo tee -a "$INSTALL_DIR/.env" > /dev/null
 echo "✅ Configuration saved (API key, data source: $DATA_SOURCE_FILE, feed mode: $FEED_MODE)."
+
+# Reduced-Beast mode: persist the receiver UUID + hub, then configure readsb to
+# forward the reduced Beast stream natively. This edits /etc/default/readsb and
+# restarts readsb (a deliberate, additive decoder edit — see CLAUDE.md).
+if [ "$FEED_MODE" = "reduce" ]; then
+    RECEIVER_UUID="$EXISTING_UUID"
+    if [ -z "$RECEIVER_UUID" ]; then
+        if command -v uuidgen &>/dev/null; then
+            RECEIVER_UUID=$(uuidgen)
+        else
+            RECEIVER_UUID=$(python3 -c 'import uuid; print(uuid.uuid4())')
+        fi
+    fi
+    HUB_HOST="${HUB_HOST:-adsb.dataero.eu}"
+    HUB_PORT="${HUB_PORT:-30004}"
+    REDUCE_INTERVAL="${REDUCE_INTERVAL:-0.25}"
+    {
+        echo "RECEIVER_UUID=$RECEIVER_UUID"
+        echo "HUB_HOST=$HUB_HOST"
+        echo "HUB_PORT=$HUB_PORT"
+        echo "REDUCE_INTERVAL=$REDUCE_INTERVAL"
+    } | sudo tee -a "$INSTALL_DIR/.env" > /dev/null
+    echo "🔧 Configuring readsb to forward reduced Beast (uuid $RECEIVER_UUID) to $HUB_HOST:$HUB_PORT ..."
+    UUID="$RECEIVER_UUID" HUB_HOST="$HUB_HOST" HUB_PORT="$HUB_PORT" REDUCE_INTERVAL="$REDUCE_INTERVAL" \
+        bash "$(dirname "$0")/feeder/configure_readsb_reduce.sh"
+fi
 
 # Create systemd service file. Requires=/After= are only emitted when we
 # matched a known systemd unit; in the unknown-unit safety-net case we omit
@@ -409,9 +458,9 @@ fi
 
 RUN_API_TEST="yes"
 CURL_DATA=()
-if [ "$FEED_MODE" = "beast" ]; then
+if [ "$FEED_MODE" != "json" ]; then
     TEST_URL="https://radar.dataero.eu/api/v1/heartbeat"
-    TEST_LABEL="heartbeat (Beast mode: aircraft data flows via the feeder's Beast forwarder, not this POST)"
+    TEST_LABEL="heartbeat (Beast/reduce mode: aircraft data flows via Beast, not this POST)"
     CURL_DATA=(--data "{\"timestamp\": $(date +%s)}")
 else
     TEST_URL="https://radar.dataero.eu/api/v1/messages"
@@ -477,7 +526,9 @@ if ! systemctl is-active --quiet dataero-feeder.service; then
 fi
 
 echo ""
-if [ "$FEED_MODE" = "beast" ]; then
+if [ "$FEED_MODE" = "reduce" ]; then
+    echo "🎉 Installation complete. readsb is forwarding reduced Beast (with UUID) to ${HUB_HOST:-adsb.dataero.eu}:${HUB_PORT:-30004}; the feeder heartbeats radar.dataero.eu."
+elif [ "$FEED_MODE" = "beast" ]; then
     echo "🎉 Installation complete. The feeder is forwarding ${DATA_SOURCE_UNIT:-the decoder}'s Beast stream to ${BEAST_SERVER}:${BEAST_PORT} and heartbeating radar.dataero.eu."
 else
     echo "🎉 Installation complete. Your feeder is sending data to radar.dataero.eu."

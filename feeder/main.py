@@ -28,6 +28,13 @@ READSB_DATA = os.getenv("READSB_DATA", "/run/readsb/aircraft.json")
 # everywhere.
 FEED_MODE = os.getenv("FEED_MODE", "json").strip().lower()
 BEAST_MODE = FEED_MODE == "beast"
+# "reduce" mode (FR24 hard rule): readsb itself forwards a *reduced* Beast
+# stream (with UUID) to the aggregator via its native beast_reduce_plus_out
+# connector — configured by feeder/configure_readsb_reduce.sh. This process then
+# does NOT byte-pump and does NOT POST; its only job is the heartbeat. Unlike
+# the raw byte-pump "beast" mode, the UUID is carried in-band, so provenance no
+# longer depends on the public-IP binding (the heartbeat is kept for liveness).
+REDUCE_MODE = FEED_MODE == "reduce"
 # Beast-mode forwarding endpoints. In Beast mode this process is a plain TCP byte
 # pump: it connects to the decoder's LOCAL Beast output port as just another
 # read-only consumer (exactly like the FlightAware / FR24 / ADSBExchange feed
@@ -198,7 +205,14 @@ def beast_forward_loop():
         backoff = min(backoff * 2, 30)
 
 if __name__ == "__main__":
-    if BEAST_MODE:
+    if REDUCE_MODE:
+        print(
+            "dataero-adsb-feeder running in REDUCE mode; readsb forwards a reduced "
+            "Beast stream (with UUID) to the Dataero aggregator natively via its "
+            f"beast_reduce_plus_out connector. This process only heartbeats ({HEARTBEAT_URL}).",
+            flush=True,
+        )
+    elif BEAST_MODE:
         print(
             f"dataero-adsb-feeder running in BEAST mode; forwarding the decoder's "
             f"Beast stream {BEAST_SRC_HOST}:{BEAST_SRC_PORT} -> {BEAST_SERVER}:{BEAST_PORT}, "
@@ -210,7 +224,7 @@ if __name__ == "__main__":
         print(f"dataero-adsb-feeder running; messages={API_URL} heartbeat={HEARTBEAT_URL}", flush=True)
     last_heartbeat = 0.0
     while True:
-        if not BEAST_MODE:
+        if not BEAST_MODE and not REDUCE_MODE:
             send_data()
         now = time.time()
         if now - last_heartbeat >= HEARTBEAT_INTERVAL_SECONDS:
