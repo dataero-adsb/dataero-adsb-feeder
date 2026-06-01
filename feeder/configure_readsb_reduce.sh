@@ -53,9 +53,9 @@ sudo cp -a "$READSB_DEFAULT" "${READSB_DEFAULT}.dataero.bak" || true
 
 # Rewrite NET_OPTIONS with python3 (tokenised, safe) rather than sed: strip any
 # previous Dataero beast_reduce connector + reduce-interval, then append fresh.
-sudo python3 - "$READSB_DEFAULT" "$CONNECTOR" "$REDUCE_INTERVAL" <<'PY'
+sudo python3 - "$READSB_DEFAULT" "$CONNECTOR" "$REDUCE_INTERVAL" "$UUID" <<'PY'
 import re, shlex, sys
-path, connector, interval = sys.argv[1], sys.argv[2], sys.argv[3]
+path, connector, interval, uuid = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 with open(path) as f:
     lines = f.readlines()
 out, found = [], False
@@ -65,26 +65,23 @@ for line in lines:
         out.append(line)
         continue
     found = True
-    toks, cleaned, skip = shlex.split(m.group(1)), [], False
-    for t in toks:
-        if skip:
-            skip = False
-            continue
-        if t.startswith('--net-connector=') and 'beast_reduce_plus_out' in t:
-            continue
-        if t == '--net-beast-reduce-interval':
-            skip = True
-            continue
-        if t.startswith('--net-beast-reduce-interval='):
-            continue
-        cleaned.append(t)
-    cleaned += [connector, '--net-beast-reduce-interval', interval]
+    toks = shlex.split(m.group(1))
+    # COEXISTENCE: drop ONLY our own previous connector (matched by our uuid) so
+    # other feeders' --net-connector entries (ADSBExchange, adsb.lol, etc.) are
+    # preserved. Leave any existing --net-beast-reduce-interval (a shared global)
+    # alone; only add one if none is present.
+    cleaned = [t for t in toks
+               if not (t.startswith('--net-connector=') and ('uuid=' + uuid) in t)]
+    cleaned.append(connector)
+    if not any(t == '--net-beast-reduce-interval'
+               or t.startswith('--net-beast-reduce-interval=') for t in cleaned):
+        cleaned += ['--net-beast-reduce-interval', interval]
     out.append('NET_OPTIONS="%s"\n' % ' '.join(cleaned))
 if not found:
     out.append('NET_OPTIONS="--net %s --net-beast-reduce-interval %s"\n' % (connector, interval))
 with open(path, 'w') as f:
     f.writelines(out)
-print("✅ NET_OPTIONS updated with the Dataero reduced-Beast connector.")
+print("✅ NET_OPTIONS updated (Dataero connector only; other feeders preserved).")
 PY
 
 echo "🔄 Restarting readsb to apply..."
