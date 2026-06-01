@@ -234,23 +234,16 @@ echo "📡 How should this device feed Dataero?"
 if [ "$DATA_SOURCE_UNIT" = "readsb.service" ]; then
     # Reduced Beast needs readsb's native beast_reduce_plus_out connector.
     echo "   1) Reduced Beast (readsb native, with UUID) — edge-reduced, preferred"
-    echo "   2) Beast byte-pump — full-rate, read-only (any decoder)"
-    echo "   3) HTTPS — POST aircraft.json (any decoder)"
-    read -p "Select feed mode [1/2/3] (default 1): " MODE_CHOICE
-    case "$MODE_CHOICE" in
-        2|beast|BEAST)           FEED_MODE="beast" ;;
-        3|https|HTTPS|json|JSON) FEED_MODE="json" ;;
-        *)                       FEED_MODE="reduce" ;;
-    esac
-else
-    echo "   1) Beast byte-pump — full-rate, read-only (any decoder)"
     echo "   2) HTTPS — POST aircraft.json (any decoder)"
-    echo "   (Reduced Beast needs readsb, which wasn't detected here.)"
     read -p "Select feed mode [1/2] (default 1): " MODE_CHOICE
     case "$MODE_CHOICE" in
         2|https|HTTPS|json|JSON) FEED_MODE="json" ;;
-        *)                       FEED_MODE="beast" ;;
+        *)                       FEED_MODE="reduce" ;;
     esac
+else
+    # Reduced Beast needs readsb; without it, HTTPS is the only offered mode.
+    echo "   Reduced Beast needs readsb (not detected) — using HTTPS (POST aircraft.json)."
+    FEED_MODE="json"
 fi
 
 if [ "$FEED_MODE" = "reduce" ]; then
