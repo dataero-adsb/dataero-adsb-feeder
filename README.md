@@ -24,11 +24,22 @@ The **Dataero ADS-B Feeder** is a lightweight Python application that reads ADS-
 
 ## How It Works
 
-The feeder reads aircraft data produced by `readsb` (or any compatible decoder) from a local JSON file on your system, then forwards it to the Dataero tracking platform over the internet. It runs as a background `systemd` service and starts automatically on boot.
+The feeder forwards the aircraft data produced by `readsb` to the Dataero tracking platform over the internet. It runs as a background `systemd` service and starts automatically on boot. There are two ways it can send data — you choose during install:
+
+**Beast + WireGuard (preferred, readsb only).** At install the feeder registers with Dataero using your API key, receives the WireGuard config of the ingest hub it's assigned to, and brings up an encrypted tunnel. `readsb` then forwards a reduced Beast stream (carrying its UUID) to that hub over the tunnel. The feeder process itself only sends a periodic heartbeat.
 
 ```
-[SDR Dongle] → [readsb decoder] → [aircraft.json] → [Dataero Feeder] → [radar.dataero.eu]
+[SDR] → [readsb] → reduced Beast (UUID) ──WireGuard tunnel──→ [Dataero ingest hub]
+                                          (registered via API key → your account)
 ```
+
+**HTTPS (fallback, any decoder).** The feeder POSTs `aircraft.json` over HTTPS every 2 seconds, authenticating each request with your API key. Use this on hosts without `readsb`.
+
+```
+[SDR] → [decoder] → [aircraft.json] → [Dataero Feeder] → [radar.dataero.eu]
+```
+
+**How your feed is linked to your account.** Beast frames carry no credential, so identity is established **once** at registration (your API key → your account) and then re-proven on every message by the WireGuard tunnel address *and* the in-band receiver UUID. Your API key is used the same way it always was — you just paste it once at install.
 
 ---
 
@@ -115,9 +126,19 @@ The feeder's configuration is stored in:
 | Setting | Description | Default |
 |---|---|---|
 | `API_KEY` | Your Dataero API key (required) | _(set during install)_ |
-| `READSB_DATA` | Path to the ADS-B JSON data file produced by your decoder | `/run/readsb/aircraft.json` |
-| `API_URL` | Dataero service endpoint | _(set automatically)_ |
+| `FEED_MODE` | `beast` (Beast over WireGuard, preferred) or `json` (HTTPS POST fallback) | `beast` |
+| `READSB_DATA` | Path to the ADS-B JSON data file produced by your decoder (json mode / detection) | `/run/readsb/aircraft.json` |
 | `DEBUG` | Enable verbose logging for troubleshooting | `FALSE` |
+
+**Beast-mode settings** (set automatically at install from the registration response — don't edit by hand):
+
+| Setting | Description |
+|---|---|
+| `REGISTRAR_URL` | Dataero registrar base URL (`https://adsb.dataero.eu`) |
+| `RECEIVER_UUID` | This feeder's receiver id — bound to your account at registration, used as `readsb --uuid` |
+| `WG_PRIVKEY` / `WG_PUBKEY` | This feeder's WireGuard keypair (the public key is the registered peer identity) |
+| `FEEDER_NAME` / `FEEDER_LAT` / `FEEDER_LON` / `FEEDER_ALT_M` | Optional station details (useful for MLAT later) |
+| `SHARD` / `TUNNEL_IP` / `BEAST_HOST` / `BEAST_PORT` | The assigned ingest hub + tunnel address |
 
 To edit the configuration after installation:
 
@@ -169,7 +190,9 @@ sudo journalctl -u dataero-feeder.service --since "1 hour ago"
 | Service fails to start | `readsb` not running | Run `sudo systemctl start readsb` and retry |
 | `aircraft.json` not found | Wrong path in config | Update `READSB_DATA` in the `.env` file |
 | Authentication error | Invalid or missing API key | Check your API key on your [Dataero profile](https://radar.dataero.eu/profile) and update `API_KEY` in `.env` |
-| No data appearing on radar | Feeder stopped or misconfigured | Check logs with `journalctl` and verify the service is running |
+| No data appearing on radar (beast mode) | WireGuard tunnel down | `sudo wg show wg-adsb` — a recent handshake means the tunnel is up. If not, `sudo wg-quick down wg-adsb && sudo wg-quick up wg-adsb`, or re-run the installer to re-register |
+| `registrar heartbeat: receiver unknown or disabled` in logs | Receiver removed/disabled server-side | Re-run `sudo bash installer.sh` to re-register |
+| No data appearing on radar (json mode) | Feeder stopped or misconfigured | Check logs with `journalctl` and verify the service is running |
 
 Enable `DEBUG=TRUE` in the `.env` file for more detailed log output when diagnosing issues.
 

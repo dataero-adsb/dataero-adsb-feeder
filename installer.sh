@@ -198,6 +198,52 @@ if [ -n "$DATA_SOURCE_UNIT" ]; then
     fi
 fi
 
+# ──────────────────────────────────────────────────────────────────────────
+# Feed mode selection (interactive).
+#
+# Two ways the data reaches Dataero — the operator chooses:
+#
+#   • Beast + WireGuard (readsb only) — the feeder registers with the Dataero
+#     registrar (API key -> owner), brings up a WireGuard tunnel to its assigned
+#     hub (feeder/wg_setup.sh), and readsb forwards a reduced Beast stream (with
+#     UUID) to that hub over the tunnel (feeder/configure_readsb_reduce.sh).
+#     main.py then only heartbeats the registrar.
+#
+#   • HTTPS  — feeder/main.py POSTs aircraft.json over HTTPS. Works everywhere.
+#
+# Both need the API key (prompted for below): HTTPS authenticates each POST; beast
+# mode uses it once at registration to bind the receiver UUID + WireGuard peer to
+# the account (thereafter the tunnel address + in-band UUID re-prove identity).
+# ──────────────────────────────────────────────────────────────────────────
+echo ""
+echo "📡 How should this device feed Dataero?"
+if [ "$DATA_SOURCE_UNIT" = "readsb.service" ]; then
+    # Beast + WireGuard needs readsb's native beast_reduce_plus_out connector.
+    echo "   1) Beast + WireGuard (readsb, registered) — edge-reduced over an"
+    echo "      encrypted tunnel to your assigned Dataero hub. Preferred."
+    echo "   2) HTTPS — POST aircraft.json (any decoder, no WireGuard)"
+    read -p "Select feed mode [1/2] (default 1): " MODE_CHOICE
+    case "$MODE_CHOICE" in
+        2|https|HTTPS|json|JSON) FEED_MODE="json" ;;
+        *)                       FEED_MODE="beast" ;;
+    esac
+else
+    # Beast + WireGuard needs readsb; without it, HTTPS is the only offered mode.
+    echo "   Beast + WireGuard needs readsb (not detected) — using HTTPS (POST aircraft.json)."
+    FEED_MODE="json"
+fi
+
+if [ "$FEED_MODE" = "beast" ]; then
+    echo "📡 Beast + WireGuard mode — this device will register with Dataero, bring up a"
+    echo "   WireGuard tunnel to its assigned hub, and readsb will forward reduced Beast"
+    echo "   (with UUID) over that tunnel (configured right after the API key step)."
+else
+    echo "🌐 HTTPS mode selected — the feeder will POST aircraft.json to radar.dataero.eu."
+fi
+
+# Registrar base URL (HTTPS, behind HAProxy). Overridable for staging.
+REGISTRAR_URL="${REGISTRAR_URL:-https://adsb.dataero.eu}"
+
 # Create installation directory
 if [ ! -d "$INSTALL_DIR" ]; then
     echo "📁 Creating installation directory at $INSTALL_DIR..."
@@ -234,6 +280,16 @@ if [ -f "$INSTALL_DIR/.env" ]; then
     EXISTING_KEY="${EXISTING_KEY%\'}"; EXISTING_KEY="${EXISTING_KEY#\'}"
 fi
 
+# Reuse an existing receiver UUID + WireGuard private key across reinstalls so the
+# account binding and the registered peer identity stay stable (read BEFORE .env
+# is rewritten below). Regenerating the WG key would orphan the peer the hub knows.
+EXISTING_UUID=""
+EXISTING_WG_PRIVKEY=""
+if [ -f "$INSTALL_DIR/.env" ]; then
+    EXISTING_UUID=$(sudo grep -E '^RECEIVER_UUID=' "$INSTALL_DIR/.env" 2>/dev/null | head -1 | cut -d= -f2-)
+    EXISTING_WG_PRIVKEY=$(sudo grep -E '^WG_PRIVKEY=' "$INSTALL_DIR/.env" 2>/dev/null | head -1 | cut -d= -f2-)
+fi
+
 API_KEY=""
 if [ -n "$EXISTING_KEY" ]; then
     KEY_LEN=${#EXISTING_KEY}
@@ -265,7 +321,107 @@ fi
 # user intervention.
 echo "API_KEY=$API_KEY"             | sudo tee    "$INSTALL_DIR/.env" > /dev/null
 echo "READSB_DATA=$DATA_SOURCE_FILE" | sudo tee -a "$INSTALL_DIR/.env" > /dev/null
-echo "✅ Configuration saved (API key + data source: $DATA_SOURCE_FILE)."
+# FEED_MODE selects what main.py does: "beast" => heartbeat only (readsb pushes
+# reduced Beast over the WireGuard tunnel); "json" => POST aircraft.json (any
+# decoder). READSB_DATA is written either way so a fallback to json needs no rewrite.
+echo "FEED_MODE=$FEED_MODE"          | sudo tee -a "$INSTALL_DIR/.env" > /dev/null
+echo "✅ Configuration saved (API key, data source: $DATA_SOURCE_FILE, feed mode: $FEED_MODE)."
+
+# Beast + WireGuard mode: register with Dataero (api_key -> owner), bring up the
+# WireGuard tunnel from the registration response, then point readsb at the
+# assigned hub over that tunnel. The readsb step edits /etc/default/readsb and
+# restarts readsb (a deliberate, additive decoder edit — see CLAUDE.md).
+if [ "$FEED_MODE" = "beast" ]; then
+    # WireGuard tooling (wg, wg-quick). On Debian 11+/Pi OS the kernel module is
+    # built in; wireguard-tools provides the userspace.
+    if ! command -v wg &>/dev/null || ! command -v wg-quick &>/dev/null; then
+        echo "📦 Installing wireguard-tools..."
+        sudo apt-get install -y wireguard-tools || {
+            echo "❌ Failed to install wireguard-tools. Install it manually and re-run."
+            exit 1
+        }
+    fi
+
+    # Stable identity: reuse the receiver UUID + WG private key across reinstalls
+    # so the peer the hub already knows isn't orphaned.
+    RECEIVER_UUID="$EXISTING_UUID"
+    if [ -z "$RECEIVER_UUID" ]; then
+        if command -v uuidgen &>/dev/null; then
+            RECEIVER_UUID=$(uuidgen)
+        else
+            RECEIVER_UUID=$(python3 -c 'import uuid; print(uuid.uuid4())')
+        fi
+    fi
+    RECEIVER_UUID=$(echo "$RECEIVER_UUID" | tr 'A-Z' 'a-z')
+    WG_PRIVKEY="$EXISTING_WG_PRIVKEY"
+    if [ -z "$WG_PRIVKEY" ]; then
+        WG_PRIVKEY=$(wg genkey)
+    fi
+    WG_PUBKEY=$(echo "$WG_PRIVKEY" | wg pubkey)
+    REDUCE_INTERVAL="${REDUCE_INTERVAL:-0.25}"
+
+    # Optional station metadata (the hub also records the public source IP).
+    # Position becomes useful for MLAT later; safe to skip now (just press Enter).
+    echo ""
+    echo "📍 Optional station details (press Enter to skip each):"
+    read -p "   Station name: " FEEDER_NAME
+    read -p "   Latitude (decimal, e.g. 50.85):  " FEEDER_LAT
+    read -p "   Longitude (decimal, e.g. 4.35):  " FEEDER_LON
+    read -p "   Antenna altitude (metres):       " FEEDER_ALT_M
+
+    echo "🛰️  Registering this feeder with Dataero ($REGISTRAR_URL)..."
+    # register.py reads its inputs from the environment and prints the assigned
+    # WireGuard + hub config as shell KEY=VALUE lines (or exits non-zero with a
+    # clear message). It retries while no ingest shard is available yet.
+    REG_VARS=$(REGISTRAR_URL="$REGISTRAR_URL" API_KEY="$API_KEY" \
+        RECEIVER_UUID="$RECEIVER_UUID" WG_PUBKEY="$WG_PUBKEY" \
+        FEEDER_NAME="$FEEDER_NAME" FEEDER_LAT="$FEEDER_LAT" \
+        FEEDER_LON="$FEEDER_LON" FEEDER_ALT_M="$FEEDER_ALT_M" \
+        "$VENV_DIR/bin/python" "$INSTALL_DIR/feeder/register.py") || {
+            echo "❌ Registration failed (see the message above). Fix the cause and re-run."
+            exit 1
+        }
+    # Sets BEAST_ID SHARD TUNNEL_IP ENABLED WG_ADDRESS WG_HUB_PUBKEY
+    # WG_HUB_ENDPOINT WG_ALLOWED_IPS WG_KEEPALIVE BEAST_HOST BEAST_PORT.
+    eval "$REG_VARS"
+    if [ -z "$WG_ADDRESS" ] || [ -z "$WG_HUB_PUBKEY" ] || [ -z "$WG_HUB_ENDPOINT" ] \
+       || [ -z "$WG_ALLOWED_IPS" ] || [ -z "$BEAST_HOST" ] || [ -z "$BEAST_PORT" ]; then
+        echo "❌ Registration response was incomplete (missing tunnel/hub fields):"
+        echo "$REG_VARS" | sed 's/^/     /'
+        echo "   This is a server-side configuration issue — please report it. Aborting."
+        exit 1
+    fi
+    echo "✅ Registered: receiver $RECEIVER_UUID -> shard $SHARD, tunnel $TUNNEL_IP."
+
+    # Persist identity + hub config. .env holds secrets (API key, WG private key),
+    # so lock it down.
+    {
+        echo "REGISTRAR_URL=$REGISTRAR_URL"
+        echo "RECEIVER_UUID=$RECEIVER_UUID"
+        echo "WG_PRIVKEY=$WG_PRIVKEY"
+        echo "WG_PUBKEY=$WG_PUBKEY"
+        echo "FEEDER_NAME=$FEEDER_NAME"
+        echo "FEEDER_LAT=$FEEDER_LAT"
+        echo "FEEDER_LON=$FEEDER_LON"
+        echo "FEEDER_ALT_M=$FEEDER_ALT_M"
+        echo "REDUCE_INTERVAL=$REDUCE_INTERVAL"
+        echo "SHARD=$SHARD"
+        echo "TUNNEL_IP=$TUNNEL_IP"
+        echo "BEAST_HOST=$BEAST_HOST"
+        echo "BEAST_PORT=$BEAST_PORT"
+    } | sudo tee -a "$INSTALL_DIR/.env" > /dev/null
+    sudo chmod 600 "$INSTALL_DIR/.env"
+
+    echo "🔐 Bringing up the WireGuard tunnel to the hub..."
+    WG_PRIVKEY="$WG_PRIVKEY" WG_ADDRESS="$WG_ADDRESS" WG_HUB_PUBKEY="$WG_HUB_PUBKEY" \
+        WG_HUB_ENDPOINT="$WG_HUB_ENDPOINT" WG_ALLOWED_IPS="$WG_ALLOWED_IPS" \
+        WG_KEEPALIVE="$WG_KEEPALIVE" \
+        bash "$INSTALL_DIR/feeder/wg_setup.sh"
+
+    echo "🔧 Configuring readsb to forward reduced Beast (uuid $RECEIVER_UUID) over the tunnel to $BEAST_HOST:$BEAST_PORT ..."
+    UUID="$RECEIVER_UUID" HUB_HOST="$BEAST_HOST" HUB_PORT="$BEAST_PORT" REDUCE_INTERVAL="$REDUCE_INTERVAL" \
+        bash "$(dirname "$0")/feeder/configure_readsb_reduce.sh"
+fi
 
 # Create systemd service file. Requires=/After= are only emitted when we
 # matched a known systemd unit; in the unknown-unit safety-net case we omit
@@ -322,32 +478,71 @@ if ! systemctl is-active --quiet dataero-feeder.service; then
 fi
 echo "✅ Service is active."
 
-# 2. Live API test: send one real payload from this installer to validate
-#    network reachability, TLS, and the API key in a single round-trip.
-#    curl exits non-zero only on transport failures; 4xx/5xx are reported
-#    via the HTTP status code, which we inspect explicitly below.
-READSB_DATA_FILE="$DATA_SOURCE_FILE"
-if [ ! -r "$READSB_DATA_FILE" ]; then
-    echo "⚠️  $READSB_DATA_FILE is not readable yet — ${DATA_SOURCE_UNIT:-the decoder} may still be warming up."
-    echo "   Skipping live API test. Re-check later with:"
-    echo "     sudo journalctl -u dataero-feeder.service -f"
-else
-    if ! command -v curl &> /dev/null; then
-        echo "📦 Installing curl for the API test..."
-        sudo apt-get install -y curl
+# 2. Live API test. What we exercise depends on the feed mode:
+#      - beast: POST a registrar heartbeat keyed on the receiver_id. Aircraft data
+#        does NOT flow through this POST (readsb forwards reduced Beast over the
+#        WireGuard tunnel), so the meaningful client-side check is that the
+#        heartbeat is accepted (proving the receiver is registered + enabled). The
+#        WireGuard handshake is checked separately below.
+#      - json:  POST one real aircraft.json payload, exercising the exact path
+#        the feeder uses.
+#    curl exits non-zero only on transport failures; 4xx/5xx come back as the
+#    HTTP status code, inspected explicitly below.
+if ! command -v curl &> /dev/null; then
+    echo "📦 Installing curl for the API test..."
+    sudo apt-get install -y curl
+fi
+
+RUN_API_TEST="yes"
+CURL_DATA=()
+CURL_AUTH=()
+if [ "$FEED_MODE" = "beast" ]; then
+    # WireGuard handshake check: a fresh tunnel should complete a handshake within
+    # a few seconds of coming up. No handshake => endpoint/key/firewall problem.
+    echo "🔐 Checking the WireGuard handshake to the hub..."
+    WG_HS=$(sudo wg show wg-adsb latest-handshakes 2>/dev/null | awk '{print $2}' | head -1)
+    if [ -n "$WG_HS" ] && [ "$WG_HS" != "0" ]; then
+        echo "✅ WireGuard handshake established with the hub."
+    else
+        echo "⚠️  No WireGuard handshake yet. The tunnel may still be settling; check with:"
+        echo "     sudo wg show wg-adsb"
     fi
-    echo "📡 Sending a test payload to https://radar.dataero.eu/api/v1/messages ..."
+    TEST_URL="$REGISTRAR_URL/receivers/heartbeat"
+    TEST_LABEL="registrar heartbeat (beast mode: aircraft data flows via Beast over WireGuard, not this POST)"
+    CURL_DATA=(--data "{\"receiver_id\": \"$RECEIVER_UUID\"}")
+    # The registrar heartbeat is keyed on receiver_id; no bearer token.
+else
+    TEST_URL="https://radar.dataero.eu/api/v1/messages"
+    TEST_LABEL="messages payload"
+    CURL_AUTH=(-H "Authorization: Bearer $API_KEY" -H "X-Target-Host: radar.dataero.eu")
+    READSB_DATA_FILE="$DATA_SOURCE_FILE"
+    if [ ! -r "$READSB_DATA_FILE" ]; then
+        echo "⚠️  $READSB_DATA_FILE is not readable yet — ${DATA_SOURCE_UNIT:-the decoder} may still be warming up."
+        echo "   Skipping live API test. Re-check later with:"
+        echo "     sudo journalctl -u dataero-feeder.service -f"
+        RUN_API_TEST="no"
+    else
+        CURL_DATA=(--data @"$READSB_DATA_FILE")
+    fi
+fi
+
+if [ "$RUN_API_TEST" = "yes" ]; then
+    echo "📡 Sending a test $TEST_LABEL to $TEST_URL ..."
     RESP_BODY=$(mktemp)
     HTTP_CODE=$(curl -sS -o "$RESP_BODY" -w "%{http_code}" \
         -X POST \
-        -H "Authorization: Bearer $API_KEY" \
         -H "Content-Type: application/json" \
-        -H "X-Target-Host: radar.dataero.eu" \
-        --data @"$READSB_DATA_FILE" \
-        "https://radar.dataero.eu/api/v1/messages" || echo "000")
+        "${CURL_AUTH[@]}" \
+        "${CURL_DATA[@]}" \
+        "$TEST_URL" || echo "000")
     case "$HTTP_CODE" in
         2*)
-            echo "✅ API accepted the upload (HTTP $HTTP_CODE). Data is flowing to radar.dataero.eu."
+            if [ "$FEED_MODE" = "beast" ]; then
+                echo "✅ Registrar accepted the heartbeat (HTTP $HTTP_CODE). This receiver is registered + enabled; readsb is forwarding reduced Beast over the tunnel."
+                echo "   ℹ️  Confirm the stream is attributed on the Dataero server side (feeder list / message counter)."
+            else
+                echo "✅ API accepted the upload (HTTP $HTTP_CODE). Data is flowing to radar.dataero.eu."
+            fi
             ;;
         401|403)
             echo "❌ API rejected your credentials (HTTP $HTTP_CODE)."
@@ -357,15 +552,24 @@ else
             rm -f "$RESP_BODY"
             exit 1
             ;;
+        404)
+            if [ "$FEED_MODE" = "beast" ]; then
+                echo "⚠️  Registrar does not recognise this receiver (HTTP 404) — it may have"
+                echo "   been disabled/removed server-side. Re-run this installer to re-register."
+            else
+                echo "⚠️  Unexpected API response (HTTP $HTTP_CODE). Response body:"
+                sed 's/^/     /' "$RESP_BODY"
+            fi
+            ;;
         000)
-            echo "❌ Could not reach https://radar.dataero.eu. Check this device's internet connection."
+            echo "❌ Could not reach ${TEST_URL%%/receivers*}. Check this device's internet connection."
             rm -f "$RESP_BODY"
             exit 1
             ;;
         *)
             echo "⚠️  Unexpected API response (HTTP $HTTP_CODE). Response body:"
             sed 's/^/     /' "$RESP_BODY"
-            echo "   The service is running; monitor logs to confirm uploads continue:"
+            echo "   The service is running; monitor logs to confirm it continues:"
             echo "     sudo journalctl -u dataero-feeder.service -f"
             ;;
     esac
@@ -380,7 +584,11 @@ if ! systemctl is-active --quiet dataero-feeder.service; then
 fi
 
 echo ""
-echo "🎉 Installation complete. Your feeder is sending data to radar.dataero.eu."
+if [ "$FEED_MODE" = "beast" ]; then
+    echo "🎉 Installation complete. readsb is forwarding reduced Beast (uuid $RECEIVER_UUID) over the WireGuard tunnel to hub $BEAST_HOST:$BEAST_PORT (shard $SHARD); the feeder heartbeats $REGISTRAR_URL."
+else
+    echo "🎉 Installation complete. Your feeder is sending data to radar.dataero.eu."
+fi
 echo ""
 echo "   ✈️  Reminder: the bytes you're now relaying were lovingly decoded by"
 echo "      readsb (https://github.com/wiedehopf/readsb). If you ever bump"
