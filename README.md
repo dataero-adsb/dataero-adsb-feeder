@@ -46,12 +46,16 @@ The feeder forwards the aircraft data produced by `readsb` to the Dataero tracki
 ## Prerequisites
 
 Before installing, make sure you have the following:
-At
-- A **Raspberry Pi** (or compatible Linux system) with an ADS-B receiver set up
-- **`readsb`** (or a compatible ADS-B decoder) installed and running, producing `/run/readsb/aircraft.json`
-- **Python 3** installed on your system
+
+- A **Raspberry Pi** (or compatible Debian-based Linux system) with an ADS-B receiver set up
+- An ADS-B decoder installed and running, producing an `aircraft.json`:
+  - **`readsb`** (`/run/readsb/aircraft.json`) — required for **Beast + WireGuard** mode
+  - or any compatible decoder (`dump1090-fa`, `dump1090-mutability`, …) — works with **HTTPS** mode
+- **Python 3.7+** installed on your system
 - An active internet connection
 - A **Dataero account** and **API key** (see steps below)
+
+> The installer auto-installs `wireguard-tools` when you pick Beast + WireGuard mode — you don't need it beforehand.
 
 ---
 
@@ -105,10 +109,12 @@ The installer will guide you through the setup interactively. When prompted, **p
 
 The installer automatically:
 
-- Verifies that Python 3 and the `readsb` service are available on your system
+- Checks for Python 3.7+ and auto-detects your ADS-B decoder (`readsb`, `dump1090-fa`, …)
+- Asks how you want to feed **when `readsb` is present**: **Beast + WireGuard** (default) or **HTTPS**; without `readsb` it falls back to **HTTPS** without prompting
 - Creates the installation directory at `/usr/local/dataero-adsb-feeder`
 - Sets up a Python virtual environment and installs all required dependencies
-- Writes a `.env` configuration file with your credentials
+- **Beast + WireGuard mode only:** installs `wireguard-tools`, registers this feeder with Dataero (binding it to your account via your API key), brings up the WireGuard tunnel to your assigned hub, and points `readsb` at that hub over the tunnel
+- Writes a `.env` configuration file with your credentials (and, in Beast mode, the assigned hub config)
 - Registers and starts a `systemd` service so the feeder runs automatically on boot
 
 Once the installer completes, your feeder is live and contributing data to [radar.dataero.eu](https://radar.dataero.eu).
@@ -138,6 +144,7 @@ The feeder's configuration is stored in:
 | `RECEIVER_UUID` | This feeder's receiver id — bound to your account at registration, used as `readsb --uuid` |
 | `WG_PRIVKEY` / `WG_PUBKEY` | This feeder's WireGuard keypair (the public key is the registered peer identity) |
 | `FEEDER_NAME` / `FEEDER_LAT` / `FEEDER_LON` / `FEEDER_ALT_M` | Optional station details (useful for MLAT later) |
+| `REDUCE_INTERVAL` | readsb position-throttle interval in seconds for the reduced Beast stream (default `0.25`) |
 | `SHARD` / `TUNNEL_IP` / `BEAST_HOST` / `BEAST_PORT` | The assigned ingest hub + tunnel address |
 
 To edit the configuration after installation:
@@ -232,8 +239,9 @@ This feeder itself is released under the [MIT License](LICENSE). It depends on, 
 | [Mictronics readsb](https://github.com/Mictronics/readsb) | Original readsb that wiedehopf's fork descends from | GNU GPL — see upstream repository |
 | [requests](https://github.com/psf/requests) | HTTP client used by the feeder | Apache License 2.0 |
 | [python-dotenv](https://github.com/theskumar/python-dotenv) | `.env` file loader | BSD 3-Clause |
+| [wireguard-tools](https://www.wireguard.com/) | Userspace tooling for the encrypted Beast tunnel (Beast + WireGuard mode) | GNU GPL v2 |
 
-The feeder does **not** redistribute or bundle readsb; the optional `feeder/install_readsb.sh` is a thin wrapper that fetches and runs the upstream installer maintained by wiedehopf at install time. All third-party copyrights and licenses remain with their respective authors.
+The feeder does **not** redistribute or bundle readsb or `wireguard-tools`; the optional `feeder/install_readsb.sh` is a thin wrapper that fetches and runs the upstream installer maintained by wiedehopf at install time, and `wireguard-tools` is installed from your distribution's repositories (`apt-get`) only when you choose Beast + WireGuard mode. All third-party copyrights and licenses remain with their respective authors.
 
 ---
 
