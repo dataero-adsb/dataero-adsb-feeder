@@ -8,27 +8,27 @@ Feed your ADS-B receiver's data to the [Dataero flight tracking network](https:/
 
 - A Raspberry Pi (or any Debian/Ubuntu Linux) with **`readsb`** installed and running.
 - An internet connection.
-- A free Dataero account + API key (Steps 1–2 below).
 
-That's it — the installer handles everything else (WireGuard, dependencies, the service).
+That's it — no account needed to start feeding. The installer handles everything else (WireGuard, dependencies, the service).
 
-## Install in 3 steps
+## Install in 2 steps
 
-### 1. Get your API key
-Sign in at **[radar.dataero.eu](https://radar.dataero.eu)** → your **Profile** → **Request API Key** → copy it. (Keep it private.)
-
-### 2. Run the installer
+### 1. Run the installer
 ```bash
 git clone https://github.com/dataero-adsb/dataero-adsb-feeder.git
 cd dataero-adsb-feeder
 sudo bash installer.sh
 ```
 
-### 3. Answer the prompts
-- **Paste your API key** when asked.
+### 2. Answer the prompts
+- **API key** — press **Enter to skip** (you can link the receiver to an account later, see below). If you already have one ([radar.dataero.eu](https://radar.dataero.eu) → **Profile** → **Request API Key**), paste it to link immediately.
 - **MLAT?** (optional — see below) Answer `y` or `N`.
 
 When it finishes, your feeder is live. ✈️
+
+## Claim your receiver (if you skipped the API key)
+
+Your receiver feeds either way — claiming it just links it to your Dataero account so you can see your stats and manage it. The installer prints a **claim link** at the end (also saved as `CLAIM_URL` in `/usr/local/dataero-adsb-feeder/.env`): open it in a browser while signed in at [radar.dataero.eu](https://radar.dataero.eu). Or simply re-run the installer with an API key.
 
 ## Optional: enable MLAT
 

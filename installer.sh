@@ -212,9 +212,11 @@ fi
 # can never disturb other feeders (FR24, FlightAware, Adsb-Italia, ...). readsb is
 # required only as a Beast source on 127.0.0.1:30005 (its default output) — the
 # same port every other feeder taps. The HTTPS/json fallback was removed. The API
-# key (prompted below) is used once at registration to bind the receiver UUID +
-# WireGuard peer to the account; thereafter the tunnel address + in-band UUID
-# re-prove identity.
+# key (prompted below) is OPTIONAL: when given, registration binds the receiver
+# UUID + WireGuard peer to the account immediately; when skipped, the receiver
+# registers UNCLAIMED (feed-first, claim-later) and the registrar returns a
+# claim URL shown at the end of the install. Thereafter the tunnel address +
+# in-band UUID re-prove identity either way.
 # ──────────────────────────────────────────────────────────────────────────
 echo ""
 if [ "$DATA_SOURCE_UNIT" != "readsb.service" ]; then
@@ -311,8 +313,12 @@ if [ -n "$EXISTING_KEY" ]; then
 fi
 
 if [ -z "$API_KEY" ]; then
-    echo "🔑 If you don't have a Dataero API key yet, you can get one at: https://radar.dataero.eu/profile"
-    read -p "🔑 Enter your Dataero API key: " API_KEY
+    echo "🔑 An API key links this receiver to your Dataero account right away"
+    echo "   (get one at https://radar.dataero.eu/profile)."
+    echo "   Don't have one? Just press Enter — the receiver will feed anyway, and"
+    echo "   a link to claim it for your account is shown at the end of the install."
+    read -p "🔑 Enter your Dataero API key (or press Enter to skip): " API_KEY
+    [ -z "$API_KEY" ] && echo "➡️  No key — registering this receiver as unclaimed (claim it later)."
 fi
 
 # Persist API key plus the detected readsb aircraft.json path. READSB_DATA is
@@ -429,8 +435,10 @@ if [ "$FEED_MODE" = "beast" ]; then
             exit 1
         }
     # Sets BEAST_ID SHARD TUNNEL_IP ENABLED WG_ADDRESS WG_HUB_PUBKEY
-    # WG_HUB_ENDPOINT WG_ALLOWED_IPS WG_KEEPALIVE BEAST_HOST BEAST_PORT, and
-    # MLAT_ENABLED MLAT_REASON MLAT_SERVER_HOST MLAT_SERVER_PORT (epic ADSB-17).
+    # WG_HUB_ENDPOINT WG_ALLOWED_IPS WG_KEEPALIVE BEAST_HOST BEAST_PORT,
+    # MLAT_ENABLED MLAT_REASON MLAT_SERVER_HOST MLAT_SERVER_PORT (epic ADSB-17),
+    # and CLAIM_URL (set only when registering without an API key — the link the
+    # operator opens to claim this receiver for their account).
     eval "$REG_VARS"
     if [ -z "$WG_ADDRESS" ] || [ -z "$WG_HUB_PUBKEY" ] || [ -z "$WG_HUB_ENDPOINT" ] \
        || [ -z "$WG_ALLOWED_IPS" ] || [ -z "$BEAST_HOST" ] || [ -z "$BEAST_PORT" ]; then
@@ -465,6 +473,9 @@ if [ "$FEED_MODE" = "beast" ]; then
         echo "MLAT_ENABLED=$MLAT_EFFECTIVE"
         echo "MLAT_SERVER_HOST=$MLAT_SERVER_HOST"
         echo "MLAT_SERVER_PORT=$MLAT_SERVER_PORT"
+        # Informational: non-empty only while the receiver is unclaimed (no API
+        # key at registration) — kept so the operator can find the link again.
+        echo "CLAIM_URL=$CLAIM_URL"
     } | sudo tee -a "$INSTALL_DIR/.env" > /dev/null
     sudo chmod 600 "$INSTALL_DIR/.env"
 
@@ -643,6 +654,26 @@ fi
 echo ""
 echo "🎉 Installation complete. dataero-readsb.service forwards reduced Beast (uuid $RECEIVER_UUID) over the WireGuard tunnel to hub $BEAST_HOST:$BEAST_PORT (shard $SHARD) — the shared decoder is untouched; the feeder heartbeats $REGISTRAR_URL."
 echo ""
+
+# Feed-first, claim-later: registered without an API key => the receiver is
+# feeding but not yet linked to an account. Show the claim link prominently —
+# this is the operator's one pointer to it (also kept in .env as CLAIM_URL).
+if [ -z "$API_KEY" ]; then
+    echo "📌 This receiver is feeding, but it is NOT YET LINKED to a Dataero account."
+    echo "   Claim it to see your stats and manage it:"
+    echo ""
+    if [ -n "$CLAIM_URL" ]; then
+        echo "       👉 $CLAIM_URL"
+        echo ""
+        echo "   Open that link in a browser while signed in at radar.dataero.eu."
+    else
+        echo "       👉 Sign in at https://radar.dataero.eu and claim receiver:"
+        echo "          $RECEIVER_UUID"
+    fi
+    echo ""
+    echo "   (Alternatively, re-run this installer later and enter an API key.)"
+    echo ""
+fi
 echo "   ✈️  Reminder: the bytes you're now relaying were lovingly decoded by"
 echo "      readsb (https://github.com/wiedehopf/readsb). If you ever bump"
 echo "      into wiedehopf or a readsb maintainer in the wild, buy them a"

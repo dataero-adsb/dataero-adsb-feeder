@@ -10,9 +10,15 @@ mode. Beast frames carry no credential, so we authenticate ONCE here over HTTPS:
   registrar  resolves api_key -> owner, records adsb.receivers, returns the
              WireGuard config of the shard the feeder was assigned.
 
-Thereafter the Beast stream is bound to the account by the WireGuard tunnel
+The api_key is OPTIONAL (feed-first, claim-later — the PiAware model): without
+it the registrar creates the receiver UNCLAIMED (owner NULL) and returns a
+claim_url the operator can open while logged in to bind it to their account
+later. Data flows either way. Re-registering an unclaimed receiver WITH a key
+upgrades it in place server-side.
+
+Thereafter the Beast stream is bound to the receiver by the WireGuard tunnel
 (source tunnel_ip) AND by the in-band beast_id (readsb --uuid), both of which
-the aggregator maps back to this receiver -> its owner.
+the aggregator maps back to this receiver -> its owner (or the unclaimed pool).
 
 beast_id derivation is the easy thing to get wrong: readsb's --uuid is parsed by
 read_uuid() (net_io.c) which takes the FIRST 16 hex chars (dashes skipped) as the
@@ -76,16 +82,19 @@ def register_feeder(
     on a permanent rejection (bad key, receiver owned by another, auth not
     configured) or once retries are exhausted.
     """
-    if not (api_key and receiver_id and wg_pubkey):
-        raise RegistrationError("api_key, receiver_id and wg_pubkey are all required")
+    if not (receiver_id and wg_pubkey):
+        raise RegistrationError("receiver_id and wg_pubkey are required")
     beast_id = beast_id or derive_beast_id(receiver_id)
     url = registrar_url.rstrip("/") + "/receivers/register"
     body = {
-        "api_key": api_key,
         "receiver_id": receiver_id,
         "beast_id": beast_id,
         "wg_pubkey": wg_pubkey,
     }
+    # api_key is optional: omitted => the receiver registers UNCLAIMED and the
+    # registrar returns a claim_url to bind it to an account later.
+    if api_key:
+        body["api_key"] = api_key
     if name:
         body["name"] = name
     if lat is not None:
@@ -128,8 +137,15 @@ def register_feeder(
             continue
         # Permanent rejections — surface a clear, actionable message.
         if resp.status_code == 401:
+            if api_key:
+                raise RegistrationError(
+                    "invalid API key — check it at https://radar.dataero.eu/profile")
+            # No key was sent: this registrar doesn't accept anonymous
+            # registration (yet) — the operator has to provide a key after all.
             raise RegistrationError(
-                "invalid API key — check it at https://radar.dataero.eu/profile")
+                "this registrar requires an API key (anonymous registration is "
+                "not enabled) — get one at https://radar.dataero.eu/profile and "
+                "re-run the installer")
         if resp.status_code == 403:
             raise RegistrationError(
                 "this receiver id is already registered to another account")
@@ -185,6 +201,9 @@ def _emit_shell(reg: dict) -> None:
         "MLAT_REASON": reg.get("mlat_reason", "") or "",
         "MLAT_SERVER_HOST": mlat.get("server_host", ""),
         "MLAT_SERVER_PORT": mlat.get("server_port", ""),
+        # Feed-first, claim-later: set only when the receiver registered without
+        # an api_key — the URL the operator opens (logged in) to claim it.
+        "CLAIM_URL": reg.get("claim_url", "") or "",
     }
     for k, v in out.items():
         # Values are hex / ip / host / int — safe to single-quote for the shell.
