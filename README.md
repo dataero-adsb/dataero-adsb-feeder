@@ -24,19 +24,13 @@ The **Dataero ADS-B Feeder** is a lightweight Python application that reads ADS-
 
 ## How It Works
 
-The feeder forwards the aircraft data produced by `readsb` to the Dataero tracking platform over the internet. It runs as a background `systemd` service and starts automatically on boot. There are two ways it can send data, selected automatically from the decoder present on the host:
+The feeder forwards the aircraft data produced by `readsb` to the Dataero tracking platform over the internet. It runs as a background `systemd` service and starts automatically on boot.
 
-**Beast + WireGuard (preferred, readsb only).** At install the feeder registers with Dataero using your API key, receives the WireGuard config of the ingest hub it's assigned to, and brings up an encrypted tunnel. `readsb` then forwards a reduced Beast stream (carrying its UUID) to that hub over the tunnel. The feeder process itself only sends a periodic heartbeat.
+**Beast + WireGuard.** At install the feeder registers with Dataero using your API key, receives the WireGuard config of the ingest hub it's assigned to, and brings up an encrypted tunnel. `readsb` then forwards a reduced Beast stream (carrying its UUID) to that hub over the tunnel. The feeder process itself only sends a periodic heartbeat.
 
 ```
 [SDR] → [readsb] → reduced Beast (UUID) ──WireGuard tunnel──→ [Dataero ingest hub]
                                           (registered via API key → your account)
-```
-
-**HTTPS (fallback, any decoder).** On hosts without `readsb`, the feeder automatically POSTs `aircraft.json` over HTTPS every 2 seconds, authenticating each request with your API key.
-
-```
-[SDR] → [decoder] → [aircraft.json] → [Dataero Feeder] → [radar.dataero.eu]
 ```
 
 **How your feed is linked to your account.** Beast frames carry no credential, so identity is established **once** at registration (your API key → your account) and then re-proven on every message by the WireGuard tunnel address *and* the in-band receiver UUID. Your API key is used the same way it always was — you just paste it once at install.
@@ -48,14 +42,12 @@ The feeder forwards the aircraft data produced by `readsb` to the Dataero tracki
 Before installing, make sure you have the following:
 
 - A **Raspberry Pi** (or compatible Debian-based Linux system) with an ADS-B receiver set up
-- An ADS-B decoder installed and running, producing an `aircraft.json`:
-  - **`readsb`** (`/run/readsb/aircraft.json`) — required for **Beast + WireGuard** mode
-  - or any compatible decoder (`dump1090-fa`, `dump1090-mutability`, …) — works with **HTTPS** mode
+- **`readsb`** installed and running (`/run/readsb/aircraft.json`) — required for the **Beast + WireGuard** feed
 - **Python 3.7+** installed on your system
 - An active internet connection
 - A **Dataero account** and **API key** (see steps below)
 
-> The installer auto-installs `wireguard-tools` when you pick Beast + WireGuard mode — you don't need it beforehand.
+> The installer auto-installs `wireguard-tools` for the Beast + WireGuard tunnel — you don't need it beforehand.
 
 ---
 
@@ -109,12 +101,11 @@ The installer will guide you through the setup interactively. When prompted, **p
 
 The installer automatically:
 
-- Checks for Python 3.7+ and auto-detects your ADS-B decoder (`readsb`, `dump1090-fa`, …)
-- Selects the feed mode from the detected decoder: **Beast + WireGuard** when `readsb` is present, otherwise **HTTPS**
+- Checks for Python 3.7+ and confirms `readsb` is present
 - Creates the installation directory at `/usr/local/dataero-adsb-feeder`
 - Sets up a Python virtual environment and installs all required dependencies
-- **Beast + WireGuard mode only:** installs `wireguard-tools`, registers this feeder with Dataero (binding it to your account via your API key), brings up the WireGuard tunnel to your assigned hub, and points `readsb` at that hub over the tunnel
-- Writes a `.env` configuration file with your credentials (and, in Beast mode, the assigned hub config)
+- Installs `wireguard-tools`, registers this feeder with Dataero (binding it to your account via your API key), brings up the WireGuard tunnel to your assigned hub, and points `readsb` at that hub over the tunnel
+- Writes a `.env` configuration file with your credentials and the assigned hub config
 - Registers and starts a `systemd` service so the feeder runs automatically on boot
 
 Once the installer completes, your feeder is live and contributing data to [radar.dataero.eu](https://radar.dataero.eu).
@@ -132,8 +123,8 @@ The feeder's configuration is stored in:
 | Setting | Description | Default |
 |---|---|---|
 | `API_KEY` | Your Dataero API key (required) | _(set during install)_ |
-| `FEED_MODE` | `beast` (Beast over WireGuard, preferred) or `json` (HTTPS POST fallback) | `beast` |
-| `READSB_DATA` | Path to the ADS-B JSON data file produced by your decoder (json mode / detection) | `/run/readsb/aircraft.json` |
+| `FEED_MODE` | Feed mode — `beast` (Beast over WireGuard) | `beast` |
+| `READSB_DATA` | Path to the `aircraft.json` produced by `readsb` (used for detection) | `/run/readsb/aircraft.json` |
 | `DEBUG` | Enable verbose logging for troubleshooting | `FALSE` |
 
 **Beast-mode settings** (set automatically at install from the registration response — don't edit by hand):
@@ -197,9 +188,8 @@ sudo journalctl -u dataero-feeder.service --since "1 hour ago"
 | Service fails to start | `readsb` not running | Run `sudo systemctl start readsb` and retry |
 | `aircraft.json` not found | Wrong path in config | Update `READSB_DATA` in the `.env` file |
 | Authentication error | Invalid or missing API key | Check your API key on your [Dataero profile](https://radar.dataero.eu/profile) and update `API_KEY` in `.env` |
-| No data appearing on radar (beast mode) | WireGuard tunnel down | `sudo wg show wg-adsb` — a recent handshake means the tunnel is up. If not, `sudo wg-quick down wg-adsb && sudo wg-quick up wg-adsb`, or re-run the installer to re-register |
+| No data appearing on radar | WireGuard tunnel down | `sudo wg show wg-adsb` — a recent handshake means the tunnel is up. If not, `sudo wg-quick down wg-adsb && sudo wg-quick up wg-adsb`, or re-run the installer to re-register |
 | `registrar heartbeat: receiver unknown or disabled` in logs | Receiver removed/disabled server-side | Re-run `sudo bash installer.sh` to re-register |
-| No data appearing on radar (json mode) | Feeder stopped or misconfigured | Check logs with `journalctl` and verify the service is running |
 
 Enable `DEBUG=TRUE` in the `.env` file for more detailed log output when diagnosing issues.
 
@@ -239,9 +229,9 @@ This feeder itself is released under the [MIT License](LICENSE). It depends on, 
 | [Mictronics readsb](https://github.com/Mictronics/readsb) | Original readsb that wiedehopf's fork descends from | GNU GPL — see upstream repository |
 | [requests](https://github.com/psf/requests) | HTTP client used by the feeder | Apache License 2.0 |
 | [python-dotenv](https://github.com/theskumar/python-dotenv) | `.env` file loader | BSD 3-Clause |
-| [wireguard-tools](https://www.wireguard.com/) | Userspace tooling for the encrypted Beast tunnel (Beast + WireGuard mode) | GNU GPL v2 |
+| [wireguard-tools](https://www.wireguard.com/) | Userspace tooling for the encrypted Beast tunnel | GNU GPL v2 |
 
-The feeder does **not** redistribute or bundle readsb or `wireguard-tools`; the optional `feeder/install_readsb.sh` is a thin wrapper that fetches and runs the upstream installer maintained by wiedehopf at install time, and `wireguard-tools` is installed from your distribution's repositories (`apt-get`) only when you choose Beast + WireGuard mode. All third-party copyrights and licenses remain with their respective authors.
+The feeder does **not** redistribute or bundle readsb or `wireguard-tools`; the optional `feeder/install_readsb.sh` is a thin wrapper that fetches and runs the upstream installer maintained by wiedehopf at install time, and `wireguard-tools` is installed from your distribution's repositories (`apt-get`) at install time. All third-party copyrights and licenses remain with their respective authors.
 
 ---
 
