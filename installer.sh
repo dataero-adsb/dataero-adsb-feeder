@@ -269,9 +269,21 @@ fi
 # is rewritten below). Regenerating the WG key would orphan the peer the hub knows.
 EXISTING_UUID=""
 EXISTING_WG_PRIVKEY=""
+# MLAT opt-in + surveyed position are also reused across reinstalls (epic ADSB-17)
+# so the operator doesn't re-enter the antenna survey every time.
+EXISTING_MLAT_ENABLED=""
+EXISTING_FEEDER_NAME=""
+EXISTING_FEEDER_LAT=""
+EXISTING_FEEDER_LON=""
+EXISTING_FEEDER_ALT_M=""
 if [ -f "$INSTALL_DIR/.env" ]; then
     EXISTING_UUID=$(sudo grep -E '^RECEIVER_UUID=' "$INSTALL_DIR/.env" 2>/dev/null | head -1 | cut -d= -f2-)
     EXISTING_WG_PRIVKEY=$(sudo grep -E '^WG_PRIVKEY=' "$INSTALL_DIR/.env" 2>/dev/null | head -1 | cut -d= -f2-)
+    EXISTING_MLAT_ENABLED=$(sudo grep -E '^MLAT_ENABLED=' "$INSTALL_DIR/.env" 2>/dev/null | head -1 | cut -d= -f2-)
+    EXISTING_FEEDER_NAME=$(sudo grep -E '^FEEDER_NAME=' "$INSTALL_DIR/.env" 2>/dev/null | head -1 | cut -d= -f2-)
+    EXISTING_FEEDER_LAT=$(sudo grep -E '^FEEDER_LAT=' "$INSTALL_DIR/.env" 2>/dev/null | head -1 | cut -d= -f2-)
+    EXISTING_FEEDER_LON=$(sudo grep -E '^FEEDER_LON=' "$INSTALL_DIR/.env" 2>/dev/null | head -1 | cut -d= -f2-)
+    EXISTING_FEEDER_ALT_M=$(sudo grep -E '^FEEDER_ALT_M=' "$INSTALL_DIR/.env" 2>/dev/null | head -1 | cut -d= -f2-)
 fi
 
 API_KEY=""
@@ -341,14 +353,61 @@ if [ "$FEED_MODE" = "beast" ]; then
     WG_PUBKEY=$(echo "$WG_PRIVKEY" | wg pubkey)
     REDUCE_INTERVAL="${REDUCE_INTERVAL:-0.25}"
 
-    # Optional station metadata (the hub also records the public source IP).
-    # Position becomes useful for MLAT later; safe to skip now (just press Enter).
+    # Station name (optional; the hub also records the public source IP).
     echo ""
-    echo "📍 Optional station details (press Enter to skip each):"
-    read -p "   Station name: " FEEDER_NAME
-    read -p "   Latitude (decimal, e.g. 50.85):  " FEEDER_LAT
-    read -p "   Longitude (decimal, e.g. 4.35):  " FEEDER_LON
-    read -p "   Antenna altitude (metres):       " FEEDER_ALT_M
+    read -p "📛 Station name (optional, press Enter to skip) [${EXISTING_FEEDER_NAME}]: " FEEDER_NAME
+    FEEDER_NAME="${FEEDER_NAME:-$EXISTING_FEEDER_NAME}"
+
+    # MLAT opt-in (epic ADSB-17). MLAT positions Mode-S aircraft that don't
+    # broadcast GPS, by time-difference-of-arrival across receivers — so it needs
+    # an ACCURATE, surveyed antenna position (error propagates directly into every
+    # solution). If you opt in, lat/lon/alt become MANDATORY.
+    echo ""
+    echo "🛰️  MLAT (multilateration) lets Dataero position non-ADS-B Mode-S aircraft"
+    echo "    using your receiver together with others nearby. It requires an accurate"
+    echo "    surveyed antenna position (lat/lon/altitude)."
+    _mlat_default="n"; [[ "${EXISTING_MLAT_ENABLED,,}" =~ ^(1|true|yes)$ ]] && _mlat_default="y"
+    read -p "    Enable MLAT for this receiver? (y/N) [${_mlat_default}]: " _mlat_ans
+    _mlat_ans="${_mlat_ans:-$_mlat_default}"
+    if [[ "$_mlat_ans" =~ ^([Yy]|[Yy][Ee][Ss])$ ]]; then
+        MLAT_ENABLED="true"
+    else
+        MLAT_ENABLED="false"
+    fi
+
+    if [ "$MLAT_ENABLED" = "true" ]; then
+        echo ""
+        echo "📍 MLAT needs your SURVEYED antenna position. Be precise — a position error"
+        echo "   of a few metres degrades every multilateration result. Use a GPS reading"
+        echo "   at the antenna, or a map tool; altitude is height above sea level in metres."
+        # Mandatory, with a tiny validation loop. Pre-fill from any existing value.
+        _read_required_num() {  # $1=prompt  $2=existing -> echoes value
+            local _p="$1" _ex="$2" _v=""
+            while :; do
+                read -p "   $_p [${_ex}]: " _v
+                _v="${_v:-$_ex}"
+                if [[ "$_v" =~ ^-?[0-9]+([.][0-9]+)?$ ]]; then echo "$_v"; return; fi
+                echo "   ↳ please enter a decimal number." >&2
+            done
+        }
+        FEEDER_LAT=$(_read_required_num "Latitude (decimal, e.g. 50.85)" "$EXISTING_FEEDER_LAT")
+        FEEDER_LON=$(_read_required_num "Longitude (decimal, e.g. 4.35)" "$EXISTING_FEEDER_LON")
+        FEEDER_ALT_M=$(_read_required_num "Antenna altitude (metres)" "$EXISTING_FEEDER_ALT_M")
+    else
+        # Position stays optional when MLAT is off (the hub still finds it useful).
+        echo ""
+        echo "📍 Optional station position (press Enter to skip each):"
+        read -p "   Latitude (decimal, e.g. 50.85)  [${EXISTING_FEEDER_LAT}]: " FEEDER_LAT
+        FEEDER_LAT="${FEEDER_LAT:-$EXISTING_FEEDER_LAT}"
+        read -p "   Longitude (decimal, e.g. 4.35)  [${EXISTING_FEEDER_LON}]: " FEEDER_LON
+        FEEDER_LON="${FEEDER_LON:-$EXISTING_FEEDER_LON}"
+        read -p "   Antenna altitude (metres)       [${EXISTING_FEEDER_ALT_M}]: " FEEDER_ALT_M
+        FEEDER_ALT_M="${FEEDER_ALT_M:-$EXISTING_FEEDER_ALT_M}"
+    fi
+
+    # Remember what the operator asked for: `eval "$REG_VARS"` below overwrites
+    # MLAT_ENABLED with the server's effective value (honoured only with a position).
+    MLAT_ENABLED_REQ="$MLAT_ENABLED"
 
     echo "🛰️  Registering this feeder with Dataero ($REGISTRAR_URL)..."
     # register.py reads its inputs from the environment and prints the assigned
@@ -358,12 +417,14 @@ if [ "$FEED_MODE" = "beast" ]; then
         RECEIVER_UUID="$RECEIVER_UUID" WG_PUBKEY="$WG_PUBKEY" \
         FEEDER_NAME="$FEEDER_NAME" FEEDER_LAT="$FEEDER_LAT" \
         FEEDER_LON="$FEEDER_LON" FEEDER_ALT_M="$FEEDER_ALT_M" \
+        MLAT_ENABLED="$MLAT_ENABLED" \
         "$VENV_DIR/bin/python" "$INSTALL_DIR/feeder/register.py") || {
             echo "❌ Registration failed (see the message above). Fix the cause and re-run."
             exit 1
         }
     # Sets BEAST_ID SHARD TUNNEL_IP ENABLED WG_ADDRESS WG_HUB_PUBKEY
-    # WG_HUB_ENDPOINT WG_ALLOWED_IPS WG_KEEPALIVE BEAST_HOST BEAST_PORT.
+    # WG_HUB_ENDPOINT WG_ALLOWED_IPS WG_KEEPALIVE BEAST_HOST BEAST_PORT, and
+    # MLAT_ENABLED MLAT_REASON MLAT_SERVER_HOST MLAT_SERVER_PORT (epic ADSB-17).
     eval "$REG_VARS"
     if [ -z "$WG_ADDRESS" ] || [ -z "$WG_HUB_PUBKEY" ] || [ -z "$WG_HUB_ENDPOINT" ] \
        || [ -z "$WG_ALLOWED_IPS" ] || [ -z "$BEAST_HOST" ] || [ -z "$BEAST_PORT" ]; then
@@ -373,6 +434,10 @@ if [ "$FEED_MODE" = "beast" ]; then
         exit 1
     fi
     echo "✅ Registered: receiver $RECEIVER_UUID -> shard $SHARD, tunnel $TUNNEL_IP."
+
+    # Effective MLAT state from the server (register.py emits the bool as
+    # True/False); normalise to lowercase for .env + reinstall reuse.
+    MLAT_EFFECTIVE="false"; [[ "${MLAT_ENABLED,,}" =~ ^(1|true|yes)$ ]] && MLAT_EFFECTIVE="true"
 
     # Persist identity + hub config. .env holds secrets (API key, WG private key),
     # so lock it down.
@@ -390,6 +455,10 @@ if [ "$FEED_MODE" = "beast" ]; then
         echo "TUNNEL_IP=$TUNNEL_IP"
         echo "BEAST_HOST=$BEAST_HOST"
         echo "BEAST_PORT=$BEAST_PORT"
+        # MLAT (epic ADSB-17): effective opt-in + the central mlat-server endpoint.
+        echo "MLAT_ENABLED=$MLAT_EFFECTIVE"
+        echo "MLAT_SERVER_HOST=$MLAT_SERVER_HOST"
+        echo "MLAT_SERVER_PORT=$MLAT_SERVER_PORT"
     } | sudo tee -a "$INSTALL_DIR/.env" > /dev/null
     sudo chmod 600 "$INSTALL_DIR/.env"
 
@@ -402,6 +471,33 @@ if [ "$FEED_MODE" = "beast" ]; then
     echo "🔧 Configuring readsb to forward reduced Beast (uuid $RECEIVER_UUID) over the tunnel to $BEAST_HOST:$BEAST_PORT ..."
     UUID="$RECEIVER_UUID" HUB_HOST="$BEAST_HOST" HUB_PORT="$BEAST_PORT" REDUCE_INTERVAL="$REDUCE_INTERVAL" \
         bash "$(dirname "$0")/feeder/configure_readsb_reduce.sh"
+
+    # MLAT (epic ADSB-17): if the operator opted in AND the server accepted it
+    # (honoured only with a full position) AND returned a server endpoint, install
+    # + start mlat-client. It reads the LOCAL full Beast (127.0.0.1:30005 — not the
+    # reduced hub stream) and dials the central mlat-server, running alongside the
+    # reduce connector (two independent consumers of the same readsb).
+    if [ "$MLAT_EFFECTIVE" = "true" ] && [ -n "$MLAT_SERVER_HOST" ]; then
+        echo "🛰️  Setting up MLAT (mlat-client -> $MLAT_SERVER_HOST:$MLAT_SERVER_PORT) ..."
+        MLAT_VENV="$INSTALL_DIR/.venv-mlat" \
+            bash "$(dirname "$0")/feeder/install_mlat_client.sh"
+        MLAT_VENV="$INSTALL_DIR/.venv-mlat" RECEIVER_UUID="$RECEIVER_UUID" \
+            MLAT_SERVER_HOST="$MLAT_SERVER_HOST" MLAT_SERVER_PORT="$MLAT_SERVER_PORT" \
+            FEEDER_LAT="$FEEDER_LAT" FEEDER_LON="$FEEDER_LON" FEEDER_ALT_M="$FEEDER_ALT_M" \
+            MLAT_USER="${FEEDER_NAME:-$RECEIVER_UUID}" \
+            bash "$(dirname "$0")/feeder/configure_mlat_client.sh"
+    elif [ "$MLAT_ENABLED_REQ" = "true" ]; then
+        # Opted in but not started: either the server declined (no position) or
+        # MLAT isn't deployed/reachable yet (no endpoint). Explain, keep feeding.
+        if [ "$MLAT_EFFECTIVE" != "true" ]; then
+            echo "⚠️  MLAT requested but not enabled by the server${MLAT_REASON:+ ($MLAT_REASON)}."
+            echo "    Re-run with an accurate lat/lon/alt to enable it. ADS-B feeding continues."
+        else
+            echo "⚠️  MLAT enabled, but no mlat-server endpoint is available yet (MLAT not"
+            echo "    deployed/reachable for your assignment). mlat-client not started; ADS-B"
+            echo "    feeding continues. Re-run the installer later to pick up MLAT."
+        fi
+    fi
 fi
 
 # Create systemd service file. Requires=/After= are only emitted when we
