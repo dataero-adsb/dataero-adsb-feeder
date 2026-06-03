@@ -199,9 +199,11 @@ if [ -n "$DATA_SOURCE_UNIT" ]; then
 fi
 
 # ──────────────────────────────────────────────────────────────────────────
-# Feed mode selection (interactive).
+# Feed mode selection.
 #
-# Two ways the data reaches Dataero — the operator chooses:
+# The data reaches Dataero one of two ways, but only Beast + WireGuard is now
+# offered to the operator; the HTTPS path remains in the code as an automatic
+# fallback for non-readsb decoders (it is no longer a menu choice):
 #
 #   • Beast + WireGuard (readsb only) — the feeder registers with the Dataero
 #     registrar (API key -> owner), brings up a WireGuard tunnel to its assigned
@@ -209,7 +211,8 @@ fi
 #     UUID) to that hub over the tunnel (feeder/configure_readsb_reduce.sh).
 #     main.py then only heartbeats the registrar.
 #
-#   • HTTPS  — feeder/main.py POSTs aircraft.json over HTTPS. Works everywhere.
+#   • HTTPS  — feeder/main.py POSTs aircraft.json over HTTPS. Works everywhere,
+#     used automatically when readsb is absent.
 #
 # Both need the API key (prompted for below): HTTPS authenticates each POST; beast
 # mode uses it once at registration to bind the receiver UUID + WireGuard peer to
@@ -219,16 +222,10 @@ echo ""
 echo "📡 How should this device feed Dataero?"
 if [ "$DATA_SOURCE_UNIT" = "readsb.service" ]; then
     # Beast + WireGuard needs readsb's native beast_reduce_plus_out connector.
-    echo "   1) Beast + WireGuard (readsb, registered) — edge-reduced over an"
-    echo "      encrypted tunnel to your assigned Dataero hub. Preferred."
-    echo "   2) HTTPS — POST aircraft.json (any decoder, no WireGuard)"
-    read -p "Select feed mode [1/2] (default 1): " MODE_CHOICE
-    case "$MODE_CHOICE" in
-        2|https|HTTPS|json|JSON) FEED_MODE="json" ;;
-        *)                       FEED_MODE="beast" ;;
-    esac
+    # It is the only offered mode on readsb (HTTPS is no longer a menu choice).
+    FEED_MODE="beast"
 else
-    # Beast + WireGuard needs readsb; without it, HTTPS is the only offered mode.
+    # Beast + WireGuard needs readsb; without it, the feeder falls back to HTTPS.
     echo "   Beast + WireGuard needs readsb (not detected) — using HTTPS (POST aircraft.json)."
     FEED_MODE="json"
 fi
