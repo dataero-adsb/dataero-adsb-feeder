@@ -199,44 +199,31 @@ if [ -n "$DATA_SOURCE_UNIT" ]; then
 fi
 
 # ──────────────────────────────────────────────────────────────────────────
-# Feed mode selection.
+# Feed mode — Beast + WireGuard (readsb only).
 #
-# The data reaches Dataero one of two ways, but only Beast + WireGuard is now
-# offered to the operator; the HTTPS path remains in the code as an automatic
-# fallback for non-readsb decoders (it is no longer a menu choice):
+# The feeder registers with the Dataero registrar (API key -> owner), brings up
+# a WireGuard tunnel to its assigned hub (feeder/wg_setup.sh), and readsb forwards
+# a reduced Beast stream (with UUID) to that hub over the tunnel
+# (feeder/configure_readsb_reduce.sh). main.py then only heartbeats the registrar.
 #
-#   • Beast + WireGuard (readsb only) — the feeder registers with the Dataero
-#     registrar (API key -> owner), brings up a WireGuard tunnel to its assigned
-#     hub (feeder/wg_setup.sh), and readsb forwards a reduced Beast stream (with
-#     UUID) to that hub over the tunnel (feeder/configure_readsb_reduce.sh).
-#     main.py then only heartbeats the registrar.
-#
-#   • HTTPS  — feeder/main.py POSTs aircraft.json over HTTPS. Works everywhere,
-#     used automatically when readsb is absent.
-#
-# Both need the API key (prompted for below): HTTPS authenticates each POST; beast
-# mode uses it once at registration to bind the receiver UUID + WireGuard peer to
-# the account (thereafter the tunnel address + in-band UUID re-prove identity).
+# This is the only feed mode the installer sets up — readsb is required (its
+# native beast_reduce_plus_out connector carries the stream). The HTTPS/json
+# fallback was removed. The API key (prompted for below) is used once at
+# registration to bind the receiver UUID + WireGuard peer to the account;
+# thereafter the tunnel address + in-band UUID re-prove identity.
 # ──────────────────────────────────────────────────────────────────────────
 echo ""
-echo "📡 How should this device feed Dataero?"
-if [ "$DATA_SOURCE_UNIT" = "readsb.service" ]; then
-    # Beast + WireGuard needs readsb's native beast_reduce_plus_out connector.
-    # It is the only offered mode on readsb (HTTPS is no longer a menu choice).
-    FEED_MODE="beast"
-else
-    # Beast + WireGuard needs readsb; without it, the feeder falls back to HTTPS.
-    echo "   Beast + WireGuard needs readsb (not detected) — using HTTPS (POST aircraft.json)."
-    FEED_MODE="json"
+if [ "$DATA_SOURCE_UNIT" != "readsb.service" ]; then
+    echo "❌ This feeder requires readsb — it feeds Dataero via Beast + WireGuard,"
+    echo "   which relies on readsb's native beast_reduce_plus_out connector."
+    echo "   Detected decoder: ${DATA_SOURCE_UNIT:-${DATA_SOURCE_FILE:-none}}."
+    echo "   Install readsb (https://github.com/wiedehopf/readsb) and re-run this installer."
+    exit 1
 fi
-
-if [ "$FEED_MODE" = "beast" ]; then
-    echo "📡 Beast + WireGuard mode — this device will register with Dataero, bring up a"
-    echo "   WireGuard tunnel to its assigned hub, and readsb will forward reduced Beast"
-    echo "   (with UUID) over that tunnel (configured right after the API key step)."
-else
-    echo "🌐 HTTPS mode selected — the feeder will POST aircraft.json to radar.dataero.eu."
-fi
+FEED_MODE="beast"
+echo "📡 Beast + WireGuard mode — this device will register with Dataero, bring up a"
+echo "   WireGuard tunnel to its assigned hub, and readsb will forward reduced Beast"
+echo "   (with UUID) over that tunnel (configured right after the API key step)."
 
 # Registrar base URL (HTTPS, behind HAProxy). Overridable for staging.
 REGISTRAR_URL="${REGISTRAR_URL:-https://adsb.dataero.eu}"
@@ -312,15 +299,12 @@ if [ -z "$API_KEY" ]; then
     read -p "🔑 Enter your Dataero API key: " API_KEY
 fi
 
-# Persist API key plus the detected aircraft.json path. Writing READSB_DATA
-# explicitly (rather than relying on main.py's default) is what lets the
-# feeder transparently consume dump1090-fa's output on PiAware without any
-# user intervention.
+# Persist API key plus the detected readsb aircraft.json path. READSB_DATA is
+# written explicitly rather than relying on main.py's default.
 echo "API_KEY=$API_KEY"             | sudo tee    "$INSTALL_DIR/.env" > /dev/null
 echo "READSB_DATA=$DATA_SOURCE_FILE" | sudo tee -a "$INSTALL_DIR/.env" > /dev/null
-# FEED_MODE selects what main.py does: "beast" => heartbeat only (readsb pushes
-# reduced Beast over the WireGuard tunnel); "json" => POST aircraft.json (any
-# decoder). READSB_DATA is written either way so a fallback to json needs no rewrite.
+# FEED_MODE tells main.py what to do; the installer only ever sets "beast" =>
+# heartbeat only, while readsb pushes reduced Beast over the WireGuard tunnel.
 echo "FEED_MODE=$FEED_MODE"          | sudo tee -a "$INSTALL_DIR/.env" > /dev/null
 echo "✅ Configuration saved (API key, data source: $DATA_SOURCE_FILE, feed mode: $FEED_MODE)."
 
@@ -475,14 +459,11 @@ if ! systemctl is-active --quiet dataero-feeder.service; then
 fi
 echo "✅ Service is active."
 
-# 2. Live API test. What we exercise depends on the feed mode:
-#      - beast: POST a registrar heartbeat keyed on the receiver_id. Aircraft data
-#        does NOT flow through this POST (readsb forwards reduced Beast over the
-#        WireGuard tunnel), so the meaningful client-side check is that the
-#        heartbeat is accepted (proving the receiver is registered + enabled). The
-#        WireGuard handshake is checked separately below.
-#      - json:  POST one real aircraft.json payload, exercising the exact path
-#        the feeder uses.
+# 2. Live API test (beast mode): POST a registrar heartbeat keyed on the
+#    receiver_id. Aircraft data does NOT flow through this POST (readsb forwards
+#    reduced Beast over the WireGuard tunnel), so the meaningful client-side check
+#    is that the heartbeat is accepted (proving the receiver is registered +
+#    enabled). The WireGuard handshake is checked separately below.
 #    curl exits non-zero only on transport failures; 4xx/5xx come back as the
 #    HTTP status code, inspected explicitly below.
 if ! command -v curl &> /dev/null; then
@@ -492,7 +473,6 @@ fi
 
 RUN_API_TEST="yes"
 CURL_DATA=()
-CURL_AUTH=()
 if [ "$FEED_MODE" = "beast" ]; then
     # WireGuard handshake check: a fresh tunnel should complete a handshake within
     # a few seconds of coming up. No handshake => endpoint/key/firewall problem.
@@ -505,22 +485,9 @@ if [ "$FEED_MODE" = "beast" ]; then
         echo "     sudo wg show wg-adsb"
     fi
     TEST_URL="$REGISTRAR_URL/receivers/heartbeat"
-    TEST_LABEL="registrar heartbeat (beast mode: aircraft data flows via Beast over WireGuard, not this POST)"
+    TEST_LABEL="registrar heartbeat (aircraft data flows via Beast over WireGuard, not this POST)"
     CURL_DATA=(--data "{\"receiver_id\": \"$RECEIVER_UUID\"}")
     # The registrar heartbeat is keyed on receiver_id; no bearer token.
-else
-    TEST_URL="https://radar.dataero.eu/api/v1/messages"
-    TEST_LABEL="messages payload"
-    CURL_AUTH=(-H "Authorization: Bearer $API_KEY" -H "X-Target-Host: radar.dataero.eu")
-    READSB_DATA_FILE="$DATA_SOURCE_FILE"
-    if [ ! -r "$READSB_DATA_FILE" ]; then
-        echo "⚠️  $READSB_DATA_FILE is not readable yet — ${DATA_SOURCE_UNIT:-the decoder} may still be warming up."
-        echo "   Skipping live API test. Re-check later with:"
-        echo "     sudo journalctl -u dataero-feeder.service -f"
-        RUN_API_TEST="no"
-    else
-        CURL_DATA=(--data @"$READSB_DATA_FILE")
-    fi
 fi
 
 if [ "$RUN_API_TEST" = "yes" ]; then
@@ -529,17 +496,12 @@ if [ "$RUN_API_TEST" = "yes" ]; then
     HTTP_CODE=$(curl -sS -o "$RESP_BODY" -w "%{http_code}" \
         -X POST \
         -H "Content-Type: application/json" \
-        "${CURL_AUTH[@]}" \
         "${CURL_DATA[@]}" \
         "$TEST_URL" || echo "000")
     case "$HTTP_CODE" in
         2*)
-            if [ "$FEED_MODE" = "beast" ]; then
-                echo "✅ Registrar accepted the heartbeat (HTTP $HTTP_CODE). This receiver is registered + enabled; readsb is forwarding reduced Beast over the tunnel."
-                echo "   ℹ️  Confirm the stream is attributed on the Dataero server side (feeder list / message counter)."
-            else
-                echo "✅ API accepted the upload (HTTP $HTTP_CODE). Data is flowing to radar.dataero.eu."
-            fi
+            echo "✅ Registrar accepted the heartbeat (HTTP $HTTP_CODE). This receiver is registered + enabled; readsb is forwarding reduced Beast over the tunnel."
+            echo "   ℹ️  Confirm the stream is attributed on the Dataero server side (feeder list / message counter)."
             ;;
         401|403)
             echo "❌ API rejected your credentials (HTTP $HTTP_CODE)."
@@ -550,13 +512,8 @@ if [ "$RUN_API_TEST" = "yes" ]; then
             exit 1
             ;;
         404)
-            if [ "$FEED_MODE" = "beast" ]; then
-                echo "⚠️  Registrar does not recognise this receiver (HTTP 404) — it may have"
-                echo "   been disabled/removed server-side. Re-run this installer to re-register."
-            else
-                echo "⚠️  Unexpected API response (HTTP $HTTP_CODE). Response body:"
-                sed 's/^/     /' "$RESP_BODY"
-            fi
+            echo "⚠️  Registrar does not recognise this receiver (HTTP 404) — it may have"
+            echo "   been disabled/removed server-side. Re-run this installer to re-register."
             ;;
         000)
             echo "❌ Could not reach ${TEST_URL%%/receivers*}. Check this device's internet connection."
@@ -581,11 +538,7 @@ if ! systemctl is-active --quiet dataero-feeder.service; then
 fi
 
 echo ""
-if [ "$FEED_MODE" = "beast" ]; then
-    echo "🎉 Installation complete. readsb is forwarding reduced Beast (uuid $RECEIVER_UUID) over the WireGuard tunnel to hub $BEAST_HOST:$BEAST_PORT (shard $SHARD); the feeder heartbeats $REGISTRAR_URL."
-else
-    echo "🎉 Installation complete. Your feeder is sending data to radar.dataero.eu."
-fi
+echo "🎉 Installation complete. readsb is forwarding reduced Beast (uuid $RECEIVER_UUID) over the WireGuard tunnel to hub $BEAST_HOST:$BEAST_PORT (shard $SHARD); the feeder heartbeats $REGISTRAR_URL."
 echo ""
 echo "   ✈️  Reminder: the bytes you're now relaying were lovingly decoded by"
 echo "      readsb (https://github.com/wiedehopf/readsb). If you ever bump"
