@@ -38,9 +38,14 @@ if [ ! -f "$MLAT_VENV/bin/mlat-client" ]; then
     echo "❌ mlat-client script missing from $MLAT_VENV/bin after install." >&2
     exit 1
 fi
-if "$MLAT_VENV/bin/python" "$MLAT_VENV/bin/mlat-client" --help >/dev/null 2>&1; then
+# Smoke-test via the venv python (the script's shebang isn't rewritten). NON-FATAL:
+# a failing --help must not abort the whole feeder install — print the real error
+# and let dataero-mlat.service surface runtime problems in its journal instead.
+echo "🔎 Verifying mlat-client runs under the venv python..."
+if _smoke="$("$MLAT_VENV/bin/python" "$MLAT_VENV/bin/mlat-client" --help 2>&1)"; then
     echo "✅ mlat-client installed (run via $MLAT_VENV/bin/python)."
 else
-    echo "❌ mlat-client installed but won't run under the venv python." >&2
-    exit 1
+    echo "⚠️  mlat-client installed, but the --help smoke test exited non-zero. Output:" >&2
+    printf '%s\n' "$_smoke" | sed 's/^/     /' >&2
+    echo "   Not aborting. After install, check: journalctl -u dataero-mlat.service -n 50" >&2
 fi
