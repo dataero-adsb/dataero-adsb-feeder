@@ -26,6 +26,16 @@ sudo rm -rf "$MLAT_VENV"
 sudo python3 -m venv "$MLAT_VENV"
 sudo "$MLAT_VENV/bin/pip" install --upgrade pip
 
+# asyncore was REMOVED from the stdlib in Python 3.12 (PEP 594), but mlat-client
+# still `import asyncore` (mlat/client/net.py, output.py, coordinator.py). On 3.12+
+# (e.g. Raspberry Pi OS Trixie ships Python 3.13) install the pyasyncore backport,
+# which provides an importable `asyncore`, so mlat-client runs. No-op on <3.12.
+PYVER=$("$MLAT_VENV/bin/python" -c 'import sys; print("%d.%d" % sys.version_info[:2])')
+if "$MLAT_VENV/bin/python" -c 'import sys; raise SystemExit(0 if sys.version_info[:2] >= (3, 12) else 1)'; then
+    echo "🧩 Python $PYVER: installing the pyasyncore backport (stdlib asyncore removed in 3.12)..."
+    sudo "$MLAT_VENV/bin/pip" install pyasyncore
+fi
+
 echo "⬇️  Building + installing mlat-client from ${MLAT_REPO}@${MLAT_REF} (compiles _modes)..."
 sudo "$MLAT_VENV/bin/pip" install "git+${MLAT_REPO}@${MLAT_REF}"
 
