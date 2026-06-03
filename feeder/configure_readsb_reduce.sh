@@ -56,31 +56,35 @@ if [ -z "$READSB_BIN" ] || [ ! -x "$READSB_BIN" ]; then
 fi
 
 # ── Self-heal: undo any /etc/default/readsb edit a PREVIOUS Dataero install made.
-# Strip ONLY our own --net-connector (matched by our uuid), leave everything else
-# exactly as-is, then restart the main readsb ONCE so other feeders get a clean
-# decoder. Skips entirely if we never touched it (the normal case from now on).
-if [ -f "$READSB_DEFAULT" ] && grep -q "uuid=${UUID}" "$READSB_DEFAULT" 2>/dev/null; then
-    echo "🧹 Legacy install detected — removing our connector from the shared $READSB_DEFAULT (no other feeders touched)..."
-    sudo python3 - "$READSB_DEFAULT" "$UUID" <<'PY'
+# Match by DESTINATION (any of OUR endpoints), NOT by the current uuid — older
+# installs left connectors with DIFFERENT uuids that a uuid match would miss. We
+# strip every --net-connector whose host is a Dataero endpoint (adsb.dataero.eu,
+# the 10.7.* WG overlay, or this run's HUB_HOST); all other feeders' connectors
+# are left exactly as-is. Then restart the main readsb ONCE. Skips if clean.
+if [ -f "$READSB_DEFAULT" ] && grep -qE 'net-connector=(adsb\.dataero\.eu|10\.7\.)' "$READSB_DEFAULT" 2>/dev/null; then
+    echo "🧹 Legacy install detected — removing Dataero connector(s) from the shared $READSB_DEFAULT (other feeders untouched)..."
+    sudo cp -a "$READSB_DEFAULT" "${READSB_DEFAULT}.dataero-selfheal.bak" 2>/dev/null || true
+    sudo python3 - "$READSB_DEFAULT" "$HUB_HOST" <<'PY'
 import re, shlex, sys
-path, uuid = sys.argv[1], sys.argv[2]
-with open(path) as f:
-    lines = f.readlines()
+path, hub = sys.argv[1], sys.argv[2]
+def ours(t):
+    if not t.startswith('--net-connector='):
+        return False
+    host = t.split('=', 1)[1].split(',')[0]
+    return host == 'adsb.dataero.eu' or host.startswith('10.7.') or (hub and host == hub)
 out = []
-for line in lines:
+for line in open(path):
     m = re.match(r'^(\s*NET_OPTIONS\s*=\s*)(["\'])(.*)\2(\s*)$', line)
     if not m:
         out.append(line)
         continue
-    toks = [t for t in shlex.split(m.group(3))
-            if not (t.startswith('--net-connector=') and ('uuid=' + uuid) in t)]
+    toks = [t for t in shlex.split(m.group(3)) if not ours(t)]
     out.append('%s"%s"\n' % (m.group(1), ' '.join(toks)))
-with open(path, 'w') as f:
-    f.writelines(out)
-print("stripped Dataero connector from NET_OPTIONS")
+open(path, 'w').writelines(out)
+print("stripped Dataero connector(s) from NET_OPTIONS")
 PY
     sudo systemctl restart readsb.service 2>/dev/null || true
-    echo "✅ Shared readsb restored; from now on Dataero never edits it."
+    echo "✅ Shared readsb cleaned; from now on Dataero never edits it."
 fi
 
 # ── Our own dedicated, net-only forwarder. No listeners (readsb listen ports
