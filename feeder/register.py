@@ -65,6 +65,7 @@ def register_feeder(
     lat=None,
     lon=None,
     altitude_m=None,
+    mlat_enabled: bool = False,
     retries: int = 6,
     backoff: float = 10.0,
 ) -> dict:
@@ -93,6 +94,11 @@ def register_feeder(
         body["lon"] = lon
     if altitude_m is not None:
         body["altitude_m"] = altitude_m
+    # MLAT opt-in (epic ADSB-17). The registrar honours it only with a full
+    # position (returns mlat_reason='position_required' otherwise) and, when
+    # accepted, returns the central mlat-server endpoint to dial.
+    if mlat_enabled:
+        body["mlat_enabled"] = True
 
     # HAProxy fronts the Dataero edge; mirror the radar feeder's host-routing hint.
     headers = {"Content-Type": "application/json",
@@ -159,6 +165,7 @@ def _emit_shell(reg: dict) -> None:
     hub, and persist hub config in .env."""
     wg = reg.get("wireguard") or {}
     agg = reg.get("aggregator") or {}
+    mlat = reg.get("mlat") or {}
     out = {
         "BEAST_ID": reg.get("beast_id", ""),
         "SHARD": reg.get("shard", ""),
@@ -171,6 +178,13 @@ def _emit_shell(reg: dict) -> None:
         "WG_KEEPALIVE": wg.get("persistent_keepalive", 25),
         "BEAST_HOST": agg.get("beast_host", ""),
         "BEAST_PORT": agg.get("beast_port", ""),
+        # MLAT (epic ADSB-17): whether the opt-in was honoured, why not (if so),
+        # and the central mlat-server endpoint to dial when it was. server_host is
+        # empty unless MLAT is deployed AND this feeder opted in with a position.
+        "MLAT_ENABLED": reg.get("mlat_enabled", False),
+        "MLAT_REASON": reg.get("mlat_reason", "") or "",
+        "MLAT_SERVER_HOST": mlat.get("server_host", ""),
+        "MLAT_SERVER_PORT": mlat.get("server_port", ""),
     }
     for k, v in out.items():
         # Values are hex / ip / host / int — safe to single-quote for the shell.
@@ -186,6 +200,7 @@ def main() -> int:
     lat = os.getenv("FEEDER_LAT", "").strip() or None
     lon = os.getenv("FEEDER_LON", "").strip() or None
     altitude_m = os.getenv("FEEDER_ALT_M", "").strip() or None
+    mlat_enabled = os.getenv("MLAT_ENABLED", "").strip().lower() in ("1", "true", "yes")
 
     try:
         reg = register_feeder(
@@ -198,6 +213,7 @@ def main() -> int:
             lat=float(lat) if lat else None,
             lon=float(lon) if lon else None,
             altitude_m=float(altitude_m) if altitude_m else None,
+            mlat_enabled=mlat_enabled,
         )
     except (RegistrationError, ValueError) as e:
         _stderr(f"❌ {e}")
