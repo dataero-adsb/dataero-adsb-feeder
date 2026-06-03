@@ -37,11 +37,14 @@ MLAT_USER="${MLAT_USER:-$RECEIVER_UUID}"
 BEAST_IN="${BEAST_IN:-127.0.0.1:30005}"
 SERVICE_FILE="/etc/systemd/system/dataero-mlat.service"
 
-if [ ! -x "$MLAT_VENV/bin/mlat-client" ]; then
+if [ ! -f "$MLAT_VENV/bin/mlat-client" ]; then
     echo "❌ mlat-client not found at $MLAT_VENV/bin/mlat-client — run install_mlat_client.sh first." >&2
     exit 1
 fi
 
+# Invoke via the venv python explicitly: the mlat-client script's
+# `#!/usr/bin/env python3` shebang isn't rewritten to the venv on a scripts=
+# install, so running it directly would use the system python3 (no mlat/_modes).
 # --alt accepts a 'm'/'ft' suffix; FEEDER_ALT_M is metres, so make it explicit.
 sudo bash -c "cat > $SERVICE_FILE" <<EOL
 [Unit]
@@ -50,7 +53,7 @@ Requires=readsb.service
 After=readsb.service network-online.target
 
 [Service]
-ExecStart=$MLAT_VENV/bin/mlat-client \\
+ExecStart=$MLAT_VENV/bin/python $MLAT_VENV/bin/mlat-client \\
   --input-type dump1090 \\
   --input-connect $BEAST_IN \\
   --server $MLAT_SERVER_HOST:$MLAT_SERVER_PORT \\

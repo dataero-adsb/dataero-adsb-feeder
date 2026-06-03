@@ -30,10 +30,17 @@ echo "⬇️  Building + installing mlat-client from ${MLAT_REPO}@${MLAT_REF} (c
 sudo "$MLAT_VENV/bin/pip" install "git+${MLAT_REPO}@${MLAT_REF}"
 
 # The package installs the `mlat-client` script into the venv bin (setup.py
-# scripts=['mlat-client']). Confirm it runs before declaring success.
-if "$MLAT_VENV/bin/mlat-client" --help >/dev/null 2>&1; then
-    echo "✅ mlat-client installed at $MLAT_VENV/bin/mlat-client."
+# scripts=['mlat-client']). Its shebang is `#!/usr/bin/env python3`, which pip
+# does NOT rewrite to the venv python for a scripts= install — so running
+# bin/mlat-client directly would use the SYSTEM python3 (no mlat/_modes modules)
+# and fail. Always invoke it via the venv python; the systemd unit does the same.
+if [ ! -f "$MLAT_VENV/bin/mlat-client" ]; then
+    echo "❌ mlat-client script missing from $MLAT_VENV/bin after install." >&2
+    exit 1
+fi
+if "$MLAT_VENV/bin/python" "$MLAT_VENV/bin/mlat-client" --help >/dev/null 2>&1; then
+    echo "✅ mlat-client installed (run via $MLAT_VENV/bin/python)."
 else
-    echo "❌ mlat-client did not install correctly into $MLAT_VENV." >&2
+    echo "❌ mlat-client installed but won't run under the venv python." >&2
     exit 1
 fi
