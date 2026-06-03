@@ -24,7 +24,7 @@ The **Dataero ADS-B Feeder** is a lightweight Python application that reads ADS-
 
 ## How It Works
 
-The feeder forwards the aircraft data produced by `readsb` to the Dataero tracking platform over the internet. It runs as a background `systemd` service and starts automatically on boot. There are two ways it can send data — you choose during install:
+The feeder forwards the aircraft data produced by `readsb` to the Dataero tracking platform over the internet. It runs as a background `systemd` service and starts automatically on boot. There are two ways it can send data, selected automatically from the decoder present on the host:
 
 **Beast + WireGuard (preferred, readsb only).** At install the feeder registers with Dataero using your API key, receives the WireGuard config of the ingest hub it's assigned to, and brings up an encrypted tunnel. `readsb` then forwards a reduced Beast stream (carrying its UUID) to that hub over the tunnel. The feeder process itself only sends a periodic heartbeat.
 
@@ -33,7 +33,7 @@ The feeder forwards the aircraft data produced by `readsb` to the Dataero tracki
                                           (registered via API key → your account)
 ```
 
-**HTTPS (fallback, any decoder).** The feeder POSTs `aircraft.json` over HTTPS every 2 seconds, authenticating each request with your API key. Use this on hosts without `readsb`.
+**HTTPS (fallback, any decoder).** On hosts without `readsb`, the feeder automatically POSTs `aircraft.json` over HTTPS every 2 seconds, authenticating each request with your API key.
 
 ```
 [SDR] → [decoder] → [aircraft.json] → [Dataero Feeder] → [radar.dataero.eu]
@@ -110,7 +110,7 @@ The installer will guide you through the setup interactively. When prompted, **p
 The installer automatically:
 
 - Checks for Python 3.7+ and auto-detects your ADS-B decoder (`readsb`, `dump1090-fa`, …)
-- Asks how you want to feed **when `readsb` is present**: **Beast + WireGuard** (default) or **HTTPS**; without `readsb` it falls back to **HTTPS** without prompting
+- Selects the feed mode from the detected decoder: **Beast + WireGuard** when `readsb` is present, otherwise **HTTPS**
 - Creates the installation directory at `/usr/local/dataero-adsb-feeder`
 - Sets up a Python virtual environment and installs all required dependencies
 - **Beast + WireGuard mode only:** installs `wireguard-tools`, registers this feeder with Dataero (binding it to your account via your API key), brings up the WireGuard tunnel to your assigned hub, and points `readsb` at that hub over the tunnel
