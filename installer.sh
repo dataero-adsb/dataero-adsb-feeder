@@ -202,15 +202,19 @@ fi
 # Feed mode — Beast + WireGuard (readsb only).
 #
 # The feeder registers with the Dataero registrar (API key -> owner), brings up
-# a WireGuard tunnel to its assigned hub (feeder/wg_setup.sh), and readsb forwards
-# a reduced Beast stream (with UUID) to that hub over the tunnel
-# (feeder/configure_readsb_reduce.sh). main.py then only heartbeats the registrar.
+# a WireGuard tunnel to its assigned hub (feeder/wg_setup.sh), and runs a
+# DEDICATED net-only readsb instance (dataero-readsb.service) that taps the local
+# decoder read-only and forwards a reduced Beast stream (with UUID) to that hub
+# over the tunnel (feeder/configure_readsb_reduce.sh). main.py then only
+# heartbeats the registrar.
 #
-# This is the only feed mode the installer sets up — readsb is required (its
-# native beast_reduce_plus_out connector carries the stream). The HTTPS/json
-# fallback was removed. The API key (prompted for below) is used once at
-# registration to bind the receiver UUID + WireGuard peer to the account;
-# thereafter the tunnel address + in-band UUID re-prove identity.
+# BUBBLE RULE: the installer does NOT modify or restart the shared decoder, so it
+# can never disturb other feeders (FR24, FlightAware, Adsb-Italia, ...). readsb is
+# required only as a Beast source on 127.0.0.1:30005 (its default output) — the
+# same port every other feeder taps. The HTTPS/json fallback was removed. The API
+# key (prompted below) is used once at registration to bind the receiver UUID +
+# WireGuard peer to the account; thereafter the tunnel address + in-band UUID
+# re-prove identity.
 # ──────────────────────────────────────────────────────────────────────────
 echo ""
 if [ "$DATA_SOURCE_UNIT" != "readsb.service" ]; then
@@ -322,8 +326,10 @@ echo "✅ Configuration saved (API key, data source: $DATA_SOURCE_FILE, feed mod
 
 # Beast + WireGuard mode: register with Dataero (api_key -> owner), bring up the
 # WireGuard tunnel from the registration response, then point readsb at the
-# assigned hub over that tunnel. The readsb step edits /etc/default/readsb and
-# restarts readsb (a deliberate, additive decoder edit — see CLAUDE.md).
+# assigned hub over that tunnel. The feed runs as a DEDICATED net-only readsb
+# instance (dataero-readsb.service) that taps the local decoder read-only — it
+# does NOT modify or restart the shared readsb, so other feeders are never
+# disturbed (see feeder/configure_readsb_reduce.sh).
 if [ "$FEED_MODE" = "beast" ]; then
     # WireGuard tooling (wg, wg-quick). On Debian 11+/Pi OS the kernel module is
     # built in; wireguard-tools provides the userspace.
@@ -468,8 +474,9 @@ if [ "$FEED_MODE" = "beast" ]; then
         WG_KEEPALIVE="$WG_KEEPALIVE" \
         bash "$INSTALL_DIR/feeder/wg_setup.sh"
 
-    echo "🔧 Configuring readsb to forward reduced Beast (uuid $RECEIVER_UUID) over the tunnel to $BEAST_HOST:$BEAST_PORT ..."
+    echo "🔧 Setting up the Dataero feed (dedicated net-only readsb instance; the shared decoder is NOT modified) -> $BEAST_HOST:$BEAST_PORT ..."
     UUID="$RECEIVER_UUID" HUB_HOST="$BEAST_HOST" HUB_PORT="$BEAST_PORT" REDUCE_INTERVAL="$REDUCE_INTERVAL" \
+        LOCAL_BEAST_PORT="${LOCAL_BEAST_PORT:-30005}" \
         bash "$(dirname "$0")/feeder/configure_readsb_reduce.sh"
 
     # MLAT (epic ADSB-17): if the operator opted in AND the server accepted it
@@ -596,7 +603,7 @@ if [ "$RUN_API_TEST" = "yes" ]; then
         "$TEST_URL" || echo "000")
     case "$HTTP_CODE" in
         2*)
-            echo "✅ Registrar accepted the heartbeat (HTTP $HTTP_CODE). This receiver is registered + enabled; readsb is forwarding reduced Beast over the tunnel."
+            echo "✅ Registrar accepted the heartbeat (HTTP $HTTP_CODE). This receiver is registered + enabled; dataero-readsb.service is forwarding reduced Beast over the tunnel."
             echo "   ℹ️  Confirm the stream is attributed on the Dataero server side (feeder list / message counter)."
             ;;
         401|403)
@@ -634,7 +641,7 @@ if ! systemctl is-active --quiet dataero-feeder.service; then
 fi
 
 echo ""
-echo "🎉 Installation complete. readsb is forwarding reduced Beast (uuid $RECEIVER_UUID) over the WireGuard tunnel to hub $BEAST_HOST:$BEAST_PORT (shard $SHARD); the feeder heartbeats $REGISTRAR_URL."
+echo "🎉 Installation complete. dataero-readsb.service forwards reduced Beast (uuid $RECEIVER_UUID) over the WireGuard tunnel to hub $BEAST_HOST:$BEAST_PORT (shard $SHARD) — the shared decoder is untouched; the feeder heartbeats $REGISTRAR_URL."
 echo ""
 echo "   ✈️  Reminder: the bytes you're now relaying were lovingly decoded by"
 echo "      readsb (https://github.com/wiedehopf/readsb). If you ever bump"
