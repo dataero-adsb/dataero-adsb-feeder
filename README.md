@@ -49,6 +49,13 @@ If you enabled MLAT, swap `dataero-feeder` for `dataero-mlat` to manage that ser
 
 **To update:** `git pull` in the repo folder, then `sudo bash installer.sh` again (it reuses your existing settings).
 
+## Uninstall
+
+```bash
+sudo bash uninstaller.sh
+```
+Surgical: removes only Dataero's services (`dataero-feeder`/`dataero-readsb`/`dataero-mlat`), the `wg-adsb` tunnel, and `/usr/local/dataero-adsb-feeder`. It never touches the shared decoder, other feeders, other WireGuard interfaces, or apt packages.
+
 ## Troubleshooting
 
 | Problem | Fix |
