@@ -2,13 +2,20 @@
 # Copyright (c) 2025-2026 Dataero ADSB
 # See LICENSE in the project root for full terms.
 
-import time
-import requests
 import os
+import subprocess
+import time
+
+import requests
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
 load_dotenv()
+
+# Daemon version, reported in every heartbeat (ADSB-29/30). The server records
+# it on adsb.receivers so shard_drain can tell which feeders are reconfig-capable.
+# 1.1.0 = heartbeat-driven reconfig (this file applies config changes itself).
+FEEDER_VERSION = "1.1.0"
 
 # Configuration
 #
@@ -29,6 +36,28 @@ REGISTRAR_HEARTBEAT_URL = f"{REGISTRAR_URL}/receivers/heartbeat"
 
 DEBUG = os.getenv("DEBUG", "FALSE").upper() == "TRUE"
 DEBUG_LOG = "/var/log/dataero-adsb-feeder.log" if DEBUG else None
+
+# ── Heartbeat-driven reconfig (ADSB-30) ──────────────────────────────────────
+# The heartbeat response carries the receiver's CURRENT assignment (config +
+# config_epoch). When the epoch changes — shard reassignment after a drain, hub
+# key rotation, endpoint move — this daemon re-applies the WireGuard tunnel and
+# the dataero-readsb forwarder itself, so destroying/redeploying a ctr hub never
+# strands a feeder. BUBBLE RULE: only OUR units are touched (wg-adsb +
+# dataero-readsb.service via the existing idempotent scripts); the shared
+# decoder and other feeds are never involved.
+INSTALL_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ENV_FILE = os.path.join(INSTALL_DIR, ".env")
+WG_CONF = "/etc/wireguard/wg-adsb.conf"
+# After a FAILED reconfigure, wait this long before retrying (a failing
+# wg-quick bounce every heartbeat would itself disturb the feed).
+RECONFIG_RETRY_SECONDS = 300
+RECONFIG_TIMEOUT_SECONDS = 120
+
+# Epoch of the config this install has applied. Empty on pre-ADSB-30 installs:
+# the first heartbeat then compares VALUES against the applied state and adopts
+# the epoch silently when they already match (no pointless tunnel bounce).
+_applied_epoch = os.getenv("CONFIG_EPOCH", "").strip()
+_last_reconfig_fail_ts = 0.0
 
 HEARTBEAT_INTERVAL_SECONDS = 60
 # Split connect/read timeouts: fail fast (3s) when the registrar is unreachable,
@@ -63,6 +92,151 @@ def _maybe_print_error(message):
         print(message, flush=True)
         _last_error_print_ts = now
 
+def _update_env_file(updates):
+    """Persist KEY=VALUE pairs into the install's .env (single occurrence per
+    key — strips any duplicates an older append-style write left behind) and
+    mirror them into os.environ. 0600 like the installer (it holds secrets)."""
+    lines = []
+    try:
+        with open(ENV_FILE) as f:
+            lines = f.readlines()
+    except FileNotFoundError:
+        pass
+    kept = [l for l in lines
+            if "=" not in l or l.split("=", 1)[0].strip() not in updates]
+    if kept and not kept[-1].endswith("\n"):
+        kept[-1] += "\n"
+    for k, v in updates.items():
+        kept.append(f"{k}={v}\n")
+    tmp = ENV_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        f.writelines(kept)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, ENV_FILE)
+    for k, v in updates.items():
+        os.environ[k] = str(v)
+
+
+def _wg_conf_peer():
+    """(hub_public_key, hub_endpoint) currently applied in the WireGuard config,
+    or (None, None) when unreadable — callers treat that as 'unknown, re-apply'."""
+    pub = endpoint = None
+    try:
+        with open(WG_CONF) as f:
+            for line in f:
+                k, _, v = line.partition("=")
+                key = k.strip().lower()
+                if key == "publickey":
+                    pub = v.strip()
+                elif key == "endpoint":
+                    endpoint = v.strip()
+    except OSError:
+        pass
+    return pub, endpoint
+
+
+def _config_matches_applied(cfg):
+    """True when the heartbeat config equals what this install already applied —
+    .env for shard/tunnel/beast, the live WireGuard conf for hub key/endpoint —
+    so a fresh epoch can be adopted without bouncing anything (the first
+    heartbeat after upgrading a Pi must be a no-op)."""
+    wg = cfg.get("wireguard") or {}
+    agg = cfg.get("aggregator") or {}
+    wg_pub, wg_ep = _wg_conf_peer()
+    return (
+        str(cfg.get("shard")) == os.getenv("SHARD", "").strip()
+        and str(cfg.get("tunnel_ip")) == os.getenv("TUNNEL_IP", "").strip()
+        and str(agg.get("beast_host")) == os.getenv("BEAST_HOST", "").strip()
+        and str(agg.get("beast_port")) == os.getenv("BEAST_PORT", "").strip()
+        and wg_pub is not None and wg.get("hub_public_key") == wg_pub
+        and wg_ep is not None and wg.get("hub_endpoint") == wg_ep
+    )
+
+
+def _run_feeder_script(script, env_extra):
+    """Run one of our idempotent setup scripts (they only touch OUR units)."""
+    path = os.path.join(INSTALL_DIR, "feeder", script)
+    res = subprocess.run(
+        ["bash", path], env={**os.environ, **{k: str(v) for k, v in env_extra.items()}},
+        capture_output=True, text=True, timeout=RECONFIG_TIMEOUT_SECONDS)
+    if res.returncode != 0:
+        raise RuntimeError(
+            f"{script} exited {res.returncode}: {res.stderr.strip()[-400:]}")
+
+
+def maybe_apply_config(resp):
+    """Apply a changed assignment from the heartbeat response (ADSB-30).
+
+    No-ops when: no/partial config block, epoch already applied, or a recent
+    failed attempt is still inside its retry window. Adopts the epoch silently
+    when the values already match the applied state. Otherwise re-runs
+    wg_setup.sh + configure_readsb_reduce.sh with the new values and persists
+    them (+ CONFIG_EPOCH) to .env only after BOTH succeed."""
+    global _applied_epoch, _last_reconfig_fail_ts
+    cfg = resp.get("config")
+    epoch = (resp.get("config_epoch") or "").strip()
+    if not cfg or not epoch or epoch == _applied_epoch:
+        return
+    wg = cfg.get("wireguard") or {}
+    agg = cfg.get("aggregator") or {}
+    needed = (cfg.get("tunnel_ip"), wg.get("hub_public_key"), wg.get("hub_endpoint"),
+              wg.get("address"), wg.get("allowed_ips"),
+              agg.get("beast_host"), agg.get("beast_port"))
+    if any(v in (None, "") for v in needed):
+        return  # never act on a partial assignment
+
+    if _config_matches_applied(cfg):
+        _update_env_file({"CONFIG_EPOCH": epoch})
+        _applied_epoch = epoch
+        log_debug(f"config epoch {epoch} adopted (values already applied)")
+        return
+
+    if time.time() - _last_reconfig_fail_ts < RECONFIG_RETRY_SECONDS:
+        return
+    wg_privkey = os.getenv("WG_PRIVKEY", "").strip()
+    if not wg_privkey:
+        _maybe_print_error("reconfig skipped: WG_PRIVKEY not in .env — re-run "
+                           "the installer to migrate this feeder.")
+        return
+
+    print(f"assignment changed (shard {os.getenv('SHARD', '?')} -> "
+          f"{cfg.get('shard')}, epoch {epoch}) — reconfiguring the Dataero "
+          "tunnel + forwarder (our own services only)...", flush=True)
+    try:
+        _run_feeder_script("wg_setup.sh", {
+            "WG_PRIVKEY": wg_privkey,
+            "WG_ADDRESS": wg["address"],
+            "WG_HUB_PUBKEY": wg["hub_public_key"],
+            "WG_HUB_ENDPOINT": wg["hub_endpoint"],
+            "WG_ALLOWED_IPS": wg["allowed_ips"],
+            "WG_KEEPALIVE": wg.get("persistent_keepalive", 25),
+        })
+        _run_feeder_script("configure_readsb_reduce.sh", {
+            "UUID": RECEIVER_UUID,
+            "HUB_HOST": agg["beast_host"],
+            "HUB_PORT": agg["beast_port"],
+            "REDUCE_INTERVAL": os.getenv("REDUCE_INTERVAL", "0.25"),
+            "LOCAL_BEAST_PORT": os.getenv("LOCAL_BEAST_PORT", "30005"),
+        })
+    except Exception as e:
+        _last_reconfig_fail_ts = time.time()
+        log_debug(f"reconfigure failed: {e}")
+        print(f"reconfigure failed (will retry in {RECONFIG_RETRY_SECONDS}s): {e}",
+              flush=True)
+        return
+    _update_env_file({
+        "SHARD": cfg.get("shard"),
+        "TUNNEL_IP": cfg.get("tunnel_ip"),
+        "BEAST_HOST": agg["beast_host"],
+        "BEAST_PORT": agg["beast_port"],
+        "CONFIG_EPOCH": epoch,
+    })
+    _applied_epoch = epoch
+    print(f"reconfigured: shard {cfg.get('shard')}, tunnel {cfg.get('tunnel_ip')}, "
+          f"beast -> {agg['beast_host']}:{agg['beast_port']} (epoch {epoch}).",
+          flush=True)
+
+
 def send_registrar_heartbeat():
     """POST a heartbeat to the Dataero registrar, keyed on this feeder's
     receiver_id (established at registration). Bumps last_seen_at server side.
@@ -75,7 +249,7 @@ def send_registrar_heartbeat():
         _maybe_print_error("beast heartbeat skipped: RECEIVER_UUID not set "
                            "(re-run the installer to register this feeder)")
         return
-    payload = {"receiver_id": RECEIVER_UUID}
+    payload = {"receiver_id": RECEIVER_UUID, "feeder_version": FEEDER_VERSION}
     if FEEDER_LAT:
         payload["lat"] = float(FEEDER_LAT)
     if FEEDER_LON:
@@ -91,6 +265,15 @@ def send_registrar_heartbeat():
                   "installer to re-register this feeder.", flush=True)
         elif not response.ok:
             print(f"registrar heartbeat failed: HTTP {response.status_code} {response.text[:200]}", flush=True)
+        else:
+            # ADSB-30: follow shard reassignments / hub key rotations announced
+            # in the heartbeat response. Never let a reconfig hiccup kill the
+            # heartbeat loop — liveness reporting always continues.
+            try:
+                maybe_apply_config(response.json())
+            except Exception as e:
+                log_debug(f"config apply error: {e}")
+                _maybe_print_error(f"heartbeat config apply error: {e}")
     except Exception as e:
         log_debug(f"Registrar heartbeat error: {e}")
         print(f"registrar heartbeat error: {e}", flush=True)
