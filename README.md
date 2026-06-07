@@ -9,7 +9,7 @@ Feed your ADS-B receiver's data to the [Dataero flight tracking network](https:/
 - A Raspberry Pi (or any Debian/Ubuntu Linux) with **`readsb`** installed and running.
 - An internet connection.
 
-That's it — no account needed to start feeding. The installer handles everything else (WireGuard, dependencies, the service).
+That's it — no account needed to start feeding. The installer handles everything else (the direct Beast feed, dependencies, the service). Your receiver sends a reduced Beast stream straight to Dataero over plain TCP — the standard `readsb`/`ultrafeeder` `beast_reduce_plus_out` path, no tunnel or proprietary client.
 
 ## Install in 2 steps
 

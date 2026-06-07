@@ -330,25 +330,26 @@ echo "READSB_DATA=$DATA_SOURCE_FILE" | sudo tee -a "$INSTALL_DIR/.env" > /dev/nu
 echo "FEED_MODE=$FEED_MODE"          | sudo tee -a "$INSTALL_DIR/.env" > /dev/null
 echo "✅ Configuration saved (API key, data source: $DATA_SOURCE_FILE, feed mode: $FEED_MODE)."
 
-# Beast + WireGuard mode: register with Dataero (api_key -> owner), bring up the
-# WireGuard tunnel from the registration response, then point readsb at the
-# assigned hub over that tunnel. The feed runs as a DEDICATED net-only readsb
+# Direct Beast mode (ADSB-34, ADSBexchange model): register with Dataero
+# (api_key -> owner), then point readsb straight at the PUBLIC hub endpoint over
+# plain TCP — no WireGuard tunnel. The feed runs as a DEDICATED net-only readsb
 # instance (dataero-readsb.service) that taps the local decoder read-only — it
 # does NOT modify or restart the shared readsb, so other feeders are never
-# disturbed (see feeder/configure_readsb_reduce.sh).
+# disturbed (see feeder/configure_readsb_reduce.sh). Identity is the in-band
+# beast_id (readsb --uuid); the daemon (main.py) stays able to apply a legacy
+# WireGuard assignment too if the server ever sends one (dual-mode).
 if [ "$FEED_MODE" = "beast" ]; then
-    # WireGuard tooling (wg, wg-quick). On Debian 11+/Pi OS the kernel module is
-    # built in; wireguard-tools provides the userspace.
-    if ! command -v wg &>/dev/null || ! command -v wg-quick &>/dev/null; then
-        echo "📦 Installing wireguard-tools..."
-        sudo apt-get install -y wireguard-tools || {
-            echo "❌ Failed to install wireguard-tools. Install it manually and re-run."
-            exit 1
-        }
+    # Migrating a feeder off the old WireGuard path: tear down the leftover tunnel
+    # so it stops dialing the overlay (BUBBLE RULE — only OUR interface, never
+    # another feeder's WireGuard).
+    if [ -f /etc/wireguard/wg-adsb.conf ]; then
+        echo "🧹 Removing the legacy Dataero WireGuard tunnel (moving to direct Beast)..."
+        sudo wg-quick down wg-adsb 2>/dev/null || true
+        sudo rm -f /etc/wireguard/wg-adsb.conf
     fi
 
-    # Stable identity: reuse the receiver UUID + WG private key across reinstalls
-    # so the peer the hub already knows isn't orphaned.
+    # Stable identity: reuse the receiver UUID across reinstalls so the receiver
+    # the hub already knows (by its in-band beast_id) isn't orphaned.
     RECEIVER_UUID="$EXISTING_UUID"
     if [ -z "$RECEIVER_UUID" ]; then
         if command -v uuidgen &>/dev/null; then
@@ -358,11 +359,6 @@ if [ "$FEED_MODE" = "beast" ]; then
         fi
     fi
     RECEIVER_UUID=$(echo "$RECEIVER_UUID" | tr 'A-Z' 'a-z')
-    WG_PRIVKEY="$EXISTING_WG_PRIVKEY"
-    if [ -z "$WG_PRIVKEY" ]; then
-        WG_PRIVKEY=$(wg genkey)
-    fi
-    WG_PUBKEY=$(echo "$WG_PRIVKEY" | wg pubkey)
     REDUCE_INTERVAL="${REDUCE_INTERVAL:-0.25}"
 
     # Station name (optional; the hub also records the public source IP).
@@ -423,10 +419,11 @@ if [ "$FEED_MODE" = "beast" ]; then
 
     echo "🛰️  Registering this feeder with Dataero ($REGISTRAR_URL)..."
     # register.py reads its inputs from the environment and prints the assigned
-    # WireGuard + hub config as shell KEY=VALUE lines (or exits non-zero with a
-    # clear message). It retries while no ingest shard is available yet.
+    # config as shell KEY=VALUE lines (or exits non-zero with a clear message).
+    # No WG_PUBKEY is passed, so register.py omits wg_pubkey and the registrar
+    # returns a DIRECT (tunnel-less) assignment with the public Beast endpoint.
     REG_VARS=$(REGISTRAR_URL="$REGISTRAR_URL" API_KEY="$API_KEY" \
-        RECEIVER_UUID="$RECEIVER_UUID" WG_PUBKEY="$WG_PUBKEY" \
+        RECEIVER_UUID="$RECEIVER_UUID" \
         FEEDER_NAME="$FEEDER_NAME" FEEDER_LAT="$FEEDER_LAT" \
         FEEDER_LON="$FEEDER_LON" FEEDER_ALT_M="$FEEDER_ALT_M" \
         MLAT_ENABLED="$MLAT_ENABLED" \
@@ -434,20 +431,18 @@ if [ "$FEED_MODE" = "beast" ]; then
             echo "❌ Registration failed (see the message above). Fix the cause and re-run."
             exit 1
         }
-    # Sets BEAST_ID SHARD TUNNEL_IP ENABLED WG_ADDRESS WG_HUB_PUBKEY
-    # WG_HUB_ENDPOINT WG_ALLOWED_IPS WG_KEEPALIVE BEAST_HOST BEAST_PORT,
-    # MLAT_ENABLED MLAT_REASON MLAT_SERVER_HOST MLAT_SERVER_PORT (epic ADSB-17),
-    # and CLAIM_URL (set only when registering without an API key — the link the
-    # operator opens to claim this receiver for their account).
+    # Sets BEAST_ID SHARD TUNNEL_IP ENABLED BEAST_HOST BEAST_PORT, MLAT_ENABLED
+    # MLAT_REASON MLAT_SERVER_HOST MLAT_SERVER_PORT (epic ADSB-17), and CLAIM_URL
+    # (set only when registering without an API key). In direct mode SHARD/
+    # TUNNEL_IP and the WG_* fields are empty.
     eval "$REG_VARS"
-    if [ -z "$WG_ADDRESS" ] || [ -z "$WG_HUB_PUBKEY" ] || [ -z "$WG_HUB_ENDPOINT" ] \
-       || [ -z "$WG_ALLOWED_IPS" ] || [ -z "$BEAST_HOST" ] || [ -z "$BEAST_PORT" ]; then
-        echo "❌ Registration response was incomplete (missing tunnel/hub fields):"
+    if [ -z "$BEAST_HOST" ] || [ -z "$BEAST_PORT" ]; then
+        echo "❌ Registration response was incomplete (no Beast endpoint):"
         echo "$REG_VARS" | sed 's/^/     /'
         echo "   This is a server-side configuration issue — please report it. Aborting."
         exit 1
     fi
-    echo "✅ Registered: receiver $RECEIVER_UUID -> shard $SHARD, tunnel $TUNNEL_IP."
+    echo "✅ Registered: receiver $RECEIVER_UUID -> direct Beast $BEAST_HOST:$BEAST_PORT (beast_id $BEAST_ID)."
 
     # Effective MLAT state from the server (register.py emits the bool as
     # True/False); normalise to lowercase for .env + reinstall reuse.
@@ -458,13 +453,14 @@ if [ "$FEED_MODE" = "beast" ]; then
     {
         echo "REGISTRAR_URL=$REGISTRAR_URL"
         echo "RECEIVER_UUID=$RECEIVER_UUID"
-        echo "WG_PRIVKEY=$WG_PRIVKEY"
-        echo "WG_PUBKEY=$WG_PUBKEY"
         echo "FEEDER_NAME=$FEEDER_NAME"
         echo "FEEDER_LAT=$FEEDER_LAT"
         echo "FEEDER_LON=$FEEDER_LON"
         echo "FEEDER_ALT_M=$FEEDER_ALT_M"
         echo "REDUCE_INTERVAL=$REDUCE_INTERVAL"
+        # Direct mode (ADSB-34): no shard/tunnel. Written empty so the daemon's
+        # first-heartbeat no-op check matches and a later legacy assignment (if the
+        # server ever sends one) can still populate them.
         echo "SHARD=$SHARD"
         echo "TUNNEL_IP=$TUNNEL_IP"
         echo "BEAST_HOST=$BEAST_HOST"
@@ -479,12 +475,9 @@ if [ "$FEED_MODE" = "beast" ]; then
     } | sudo tee -a "$INSTALL_DIR/.env" > /dev/null
     sudo chmod 600 "$INSTALL_DIR/.env"
 
-    echo "🔐 Bringing up the WireGuard tunnel to the hub..."
-    WG_PRIVKEY="$WG_PRIVKEY" WG_ADDRESS="$WG_ADDRESS" WG_HUB_PUBKEY="$WG_HUB_PUBKEY" \
-        WG_HUB_ENDPOINT="$WG_HUB_ENDPOINT" WG_ALLOWED_IPS="$WG_ALLOWED_IPS" \
-        WG_KEEPALIVE="$WG_KEEPALIVE" \
-        bash "$INSTALL_DIR/feeder/wg_setup.sh"
-
+    # Direct mode: no tunnel to bring up — readsb dials the public Beast endpoint
+    # straight over TCP. (feeder/wg_setup.sh is retained for the daemon's dual-mode
+    # path but is not invoked on a direct install.)
     echo "🔧 Setting up the Dataero feed (dedicated net-only readsb instance; the shared decoder is NOT modified) -> $BEAST_HOST:$BEAST_PORT ..."
     UUID="$RECEIVER_UUID" HUB_HOST="$BEAST_HOST" HUB_PORT="$BEAST_PORT" REDUCE_INTERVAL="$REDUCE_INTERVAL" \
         LOCAL_BEAST_PORT="${LOCAL_BEAST_PORT:-30005}" \
