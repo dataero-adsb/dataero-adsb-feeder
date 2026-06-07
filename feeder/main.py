@@ -15,17 +15,23 @@ load_dotenv()
 # Daemon version, reported in every heartbeat (ADSB-29/30). The server records
 # it on adsb.receivers so shard_drain can tell which feeders are reconfig-capable.
 # 1.1.0 = heartbeat-driven reconfig (this file applies config changes itself).
-FEEDER_VERSION = "1.1.0"
+# 1.2.0 = dual-mode (ADSB-34): applies EITHER a direct-Beast assignment (no
+#         wireguard block — readsb forwards straight to the public hub over plain
+#         TCP) OR a legacy WireGuard assignment, whichever the server sends.
+FEEDER_VERSION = "1.2.0"
 
 # Configuration
 #
-# The feeder runs in a single mode (Beast + WireGuard): readsb forwards a reduced
-# Beast stream (with UUID) to the feeder's assigned Dataero ingest hub OVER A
-# WIREGUARD TUNNEL (set up at install from the registration response). Identity is
-# bound to the account at registration (api_key -> owner) and re-proven on every
-# message by the tunnel source IP + in-band beast_id. This process does NOT POST
-# aircraft data; its only job is the registrar heartbeat (liveness / last_seen_at).
-# The old json/HTTPS feed mode was removed.
+# The feeder runs readsb as a net-only forwarder of a reduced Beast stream (with
+# in-band UUID) to its assigned Dataero ingest hub. Two transports coexist during
+# the WireGuard -> direct migration (ADSB-34), selected by the server's config:
+#   * DIRECT (ADSBexchange model): readsb dials the PUBLIC hub endpoint over plain
+#     TCP. No tunnel. Identity is the in-band beast_id only.
+#   * LEGACY: readsb sends Beast to the hub's overlay address over a WireGuard
+#     tunnel set up at install. Kept working until the fleet has migrated.
+# Identity is bound to the account at registration (api_key -> owner). This process
+# does NOT POST aircraft data; its only job is the registrar heartbeat (liveness /
+# last_seen_at) and applying any reassignment the heartbeat announces.
 REGISTRAR_URL = os.getenv("REGISTRAR_URL", "https://adsb.dataero.eu").rstrip("/")
 RECEIVER_UUID = os.getenv("RECEIVER_UUID", "").strip()
 # Optional self-reported position (the hub records the public IP regardless).
@@ -137,17 +143,25 @@ def _wg_conf_peer():
 
 def _config_matches_applied(cfg):
     """True when the heartbeat config equals what this install already applied —
-    .env for shard/tunnel/beast, the live WireGuard conf for hub key/endpoint —
-    so a fresh epoch can be adopted without bouncing anything (the first
-    heartbeat after upgrading a Pi must be a no-op)."""
+    .env for shard/tunnel/beast, and (legacy only) the live WireGuard conf for the
+    hub key/endpoint — so a fresh epoch can be adopted without bouncing anything
+    (the first heartbeat after upgrading a Pi must be a no-op)."""
     wg = cfg.get("wireguard") or {}
     agg = cfg.get("aggregator") or {}
+    beast_matches = (
+        str(agg.get("beast_host")) == os.getenv("BEAST_HOST", "").strip()
+        and str(agg.get("beast_port")) == os.getenv("BEAST_PORT", "").strip()
+    )
+    if not wg:
+        # DIRECT (ADSB-34): no tunnel — only the public Beast endpoint matters, and
+        # the feeder must already have shed any prior shard.
+        return beast_matches and os.getenv("SHARD", "").strip() in ("", "None")
+    # LEGACY tunnel: also compare shard/tunnel and the live wg conf peer.
     wg_pub, wg_ep = _wg_conf_peer()
     return (
         str(cfg.get("shard")) == os.getenv("SHARD", "").strip()
         and str(cfg.get("tunnel_ip")) == os.getenv("TUNNEL_IP", "").strip()
-        and str(agg.get("beast_host")) == os.getenv("BEAST_HOST", "").strip()
-        and str(agg.get("beast_port")) == os.getenv("BEAST_PORT", "").strip()
+        and beast_matches
         and wg_pub is not None and wg.get("hub_public_key") == wg_pub
         and wg_ep is not None and wg.get("hub_endpoint") == wg_ep
     )
@@ -164,14 +178,34 @@ def _run_feeder_script(script, env_extra):
             f"{script} exited {res.returncode}: {res.stderr.strip()[-400:]}")
 
 
+def _teardown_tunnel():
+    """Bring down and remove the legacy wg-adsb tunnel if present (ADSB-34
+    migration to direct Beast). Idempotent and scoped to OUR interface only
+    (BUBBLE RULE — never touches other WireGuard interfaces)."""
+    if not os.path.exists(WG_CONF):
+        return
+    try:
+        subprocess.run(["wg-quick", "down", "wg-adsb"],
+                       capture_output=True, text=True, timeout=30)
+    except Exception as e:
+        log_debug(f"wg-adsb teardown (down) note: {e}")
+    try:
+        os.remove(WG_CONF)
+    except OSError as e:
+        log_debug(f"wg-adsb teardown (rm) note: {e}")
+
+
 def maybe_apply_config(resp):
-    """Apply a changed assignment from the heartbeat response (ADSB-30).
+    """Apply a changed assignment from the heartbeat response (ADSB-30/34).
 
     No-ops when: no/partial config block, epoch already applied, or a recent
     failed attempt is still inside its retry window. Adopts the epoch silently
-    when the values already match the applied state. Otherwise re-runs
-    wg_setup.sh + configure_readsb_reduce.sh with the new values and persists
-    them (+ CONFIG_EPOCH) to .env only after BOTH succeed."""
+    when the values already match the applied state. Otherwise re-applies the
+    transport the server dictates and persists the new values (+ CONFIG_EPOCH) to
+    .env only after it succeeds:
+      * DIRECT (ADSB-34, no wireguard block): tear down any leftover tunnel, then
+        point the readsb forwarder at the public hub endpoint.
+      * LEGACY (wireguard block present): run wg_setup.sh + the forwarder."""
     global _applied_epoch, _last_reconfig_fail_ts
     cfg = resp.get("config")
     epoch = (resp.get("config_epoch") or "").strip()
@@ -179,9 +213,14 @@ def maybe_apply_config(resp):
         return
     wg = cfg.get("wireguard") or {}
     agg = cfg.get("aggregator") or {}
-    needed = (cfg.get("tunnel_ip"), wg.get("hub_public_key"), wg.get("hub_endpoint"),
-              wg.get("address"), wg.get("allowed_ips"),
-              agg.get("beast_host"), agg.get("beast_port"))
+    direct = not wg  # ADSB-34: no wireguard block => direct Beast transport
+
+    if direct:
+        needed = (agg.get("beast_host"), agg.get("beast_port"))
+    else:
+        needed = (cfg.get("tunnel_ip"), wg.get("hub_public_key"), wg.get("hub_endpoint"),
+                  wg.get("address"), wg.get("allowed_ips"),
+                  agg.get("beast_host"), agg.get("beast_port"))
     if any(v in (None, "") for v in needed):
         return  # never act on a partial assignment
 
@@ -193,24 +232,30 @@ def maybe_apply_config(resp):
 
     if time.time() - _last_reconfig_fail_ts < RECONFIG_RETRY_SECONDS:
         return
-    wg_privkey = os.getenv("WG_PRIVKEY", "").strip()
-    if not wg_privkey:
-        _maybe_print_error("reconfig skipped: WG_PRIVKEY not in .env — re-run "
-                           "the installer to migrate this feeder.")
-        return
 
-    print(f"assignment changed (shard {os.getenv('SHARD', '?')} -> "
-          f"{cfg.get('shard')}, epoch {epoch}) — reconfiguring the Dataero "
-          "tunnel + forwarder (our own services only)...", flush=True)
+    wg_privkey = ""
+    if not direct:
+        wg_privkey = os.getenv("WG_PRIVKEY", "").strip()
+        if not wg_privkey:
+            _maybe_print_error("legacy reconfig skipped: WG_PRIVKEY not in .env — "
+                               "re-run the installer to migrate this feeder.")
+            return
+
+    print(f"assignment changed ({'direct' if direct else 'tunnel'}; epoch {epoch}) "
+          "— reconfiguring the Dataero forwarder (our own services only)...",
+          flush=True)
     try:
-        _run_feeder_script("wg_setup.sh", {
-            "WG_PRIVKEY": wg_privkey,
-            "WG_ADDRESS": wg["address"],
-            "WG_HUB_PUBKEY": wg["hub_public_key"],
-            "WG_HUB_ENDPOINT": wg["hub_endpoint"],
-            "WG_ALLOWED_IPS": wg["allowed_ips"],
-            "WG_KEEPALIVE": wg.get("persistent_keepalive", 25),
-        })
+        if direct:
+            _teardown_tunnel()  # shed any leftover wg-adsb from a prior legacy install
+        else:
+            _run_feeder_script("wg_setup.sh", {
+                "WG_PRIVKEY": wg_privkey,
+                "WG_ADDRESS": wg["address"],
+                "WG_HUB_PUBKEY": wg["hub_public_key"],
+                "WG_HUB_ENDPOINT": wg["hub_endpoint"],
+                "WG_ALLOWED_IPS": wg["allowed_ips"],
+                "WG_KEEPALIVE": wg.get("persistent_keepalive", 25),
+            })
         _run_feeder_script("configure_readsb_reduce.sh", {
             "UUID": RECEIVER_UUID,
             "HUB_HOST": agg["beast_host"],
@@ -225,14 +270,16 @@ def maybe_apply_config(resp):
               flush=True)
         return
     _update_env_file({
-        "SHARD": cfg.get("shard"),
-        "TUNNEL_IP": cfg.get("tunnel_ip"),
+        # Direct feeders carry no shard/tunnel — clear them so a later heartbeat
+        # match is a no-op and the drain-to-zero check can complete.
+        "SHARD": "" if direct else cfg.get("shard"),
+        "TUNNEL_IP": "" if direct else cfg.get("tunnel_ip"),
         "BEAST_HOST": agg["beast_host"],
         "BEAST_PORT": agg["beast_port"],
         "CONFIG_EPOCH": epoch,
     })
     _applied_epoch = epoch
-    print(f"reconfigured: shard {cfg.get('shard')}, tunnel {cfg.get('tunnel_ip')}, "
+    print(f"reconfigured ({'direct' if direct else 'tunnel'}): "
           f"beast -> {agg['beast_host']}:{agg['beast_port']} (epoch {epoch}).",
           flush=True)
 

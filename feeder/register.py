@@ -82,15 +82,19 @@ def register_feeder(
     on a permanent rejection (bad key, receiver owned by another, auth not
     configured) or once retries are exhausted.
     """
-    if not (receiver_id and wg_pubkey):
-        raise RegistrationError("receiver_id and wg_pubkey are required")
+    if not receiver_id:
+        raise RegistrationError("receiver_id is required")
     beast_id = beast_id or derive_beast_id(receiver_id)
     url = registrar_url.rstrip("/") + "/receivers/register"
     body = {
         "receiver_id": receiver_id,
         "beast_id": beast_id,
-        "wg_pubkey": wg_pubkey,
     }
+    # ADSB-34 (WireGuard -> direct Beast): wg_pubkey is sent ONLY for a legacy
+    # WireGuard registration. A direct (tunnel-less) feeder omits it, and the
+    # registrar assigns no shard/tunnel and returns the public Beast endpoint.
+    if wg_pubkey:
+        body["wg_pubkey"] = wg_pubkey
     # api_key is optional: omitted => the receiver registers UNCLAIMED and the
     # registrar returns a claim_url to bind it to an account later.
     if api_key:
@@ -238,8 +242,13 @@ def main() -> int:
         _stderr(f"❌ {e}")
         return 1
 
-    if not reg.get("wireguard", {}).get("address"):
-        _stderr(f"❌ registrar returned no tunnel config: {json.dumps(reg)}")
+    # ADSB-34: accept either a legacy tunnel assignment (wireguard.address) or a
+    # direct assignment (aggregator.beast_host). Only a response with neither is
+    # unusable.
+    wg = reg.get("wireguard") or {}
+    agg = reg.get("aggregator") or {}
+    if not wg.get("address") and not agg.get("beast_host"):
+        _stderr(f"❌ registrar returned no usable config: {json.dumps(reg)}")
         return 1
     _emit_shell(reg)
     return 0
