@@ -651,20 +651,30 @@ echo ""
 # Feed-first, claim-later: registered without an API key => the receiver is
 # feeding but not yet linked to an account. Show the claim link prominently —
 # this is the operator's one pointer to it (also kept in .env as CLAIM_URL).
+# The link is the WHOLE point: it carries the right UUID, so there's nothing to
+# type. The explicit ultrafeeder warning below is deliberate — operators coming
+# from FR24/ADSBx/PiAware reflexively paste their ultrafeeder UUID, which is a
+# DIFFERENT id and yields "receiver not found" on the claim page.
 if [ -z "$API_KEY" ]; then
     echo "📌 This receiver is feeding, but it is NOT YET LINKED to a Dataero account."
-    echo "   Claim it to see your stats and manage it:"
     echo ""
     if [ -n "$CLAIM_URL" ]; then
+        echo "   ✅ To claim it, just OPEN THIS LINK while signed in at radar.dataero.eu:"
+        echo ""
         echo "       👉 $CLAIM_URL"
         echo ""
-        echo "   Open that link in a browser while signed in at radar.dataero.eu."
+        echo "      Nothing to type — the link already carries the right UUID."
     else
-        echo "       👉 Sign in at https://radar.dataero.eu and claim receiver:"
+        echo "   ✅ Sign in at https://radar.dataero.eu, open \"Claim a receiver\", and"
+        echo "      paste THIS Dataero receiver UUID:"
+        echo ""
         echo "          $RECEIVER_UUID"
     fi
     echo ""
-    echo "   (Alternatively, re-run this installer later and enter an API key.)"
+    echo "   ⚠️  Use the Dataero UUID above — NOT your ultrafeeder / readsb UUID."
+    echo "      They are different ids; the ultrafeeder one gives \"receiver not found\"."
+    echo "      (Lost the link? Re-run this installer, or read it back with:"
+    echo "       sudo grep RECEIVER_UUID $INSTALL_DIR/.env — then claim at radar.dataero.eu/claim.)"
     echo ""
 fi
 echo "   ✈️  Reminder: the bytes you're now relaying were lovingly decoded by"
