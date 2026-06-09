@@ -30,10 +30,9 @@ When it finishes, your feeder is live. ✈️
 
 ## Claim your receiver
 
-Every install registers your receiver as **unclaimed** — it feeds immediately, and claiming it later just links it to your Dataero account so you can see your stats and manage it. There are two ways:
+Every install registers your receiver as **unclaimed** — it feeds immediately, and claiming it later just links it to your Dataero account so you can see your stats and manage it.
 
-- **Open the claim link.** The installer prints a **claim link** at the end (also saved as `CLAIM_URL` in `/usr/local/dataero-adsb-feeder/.env`): open it in a browser while signed in at [radar.dataero.eu](https://radar.dataero.eu). The link already carries the right id — nothing to type.
-- **Paste your receiver UUID.** Sign in at [radar.dataero.eu](https://radar.dataero.eu), go to **Claim a receiver** ([radar.dataero.eu/claim](https://radar.dataero.eu/claim)), and paste your **Dataero receiver UUID**.
+Sign in at [radar.dataero.eu](https://radar.dataero.eu), open your **profile → Receiver** tab, and paste your **Dataero receiver UUID** into **Link a receiver**. The installer prints that UUID in its final banner (and it's saved as `RECEIVER_UUID` in `/usr/local/dataero-adsb-feeder/.env`).
 
 > ⚠️ This **Dataero receiver UUID is NOT your `ultrafeeder`/`readsb` UUID** — they are different ids. Using the ultrafeeder one gives "receiver not found". Read the correct Dataero UUID with:
 >
