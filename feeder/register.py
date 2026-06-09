@@ -3,18 +3,14 @@
 # See LICENSE in the project root for full terms.
 """Feeder registration client for the Beast + WireGuard ingest path.
 
-This is the identity step that replaces the per-POST API key of the HTTPS json
-mode. Beast frames carry no credential, so we authenticate ONCE here over HTTPS:
+This is the identity step for the Beast ingest path. Beast frames carry no
+credential, so we register the receiver ONCE here over HTTPS, sending its
+receiver_id + beast_id (+ wg_pubkey only for a legacy WireGuard assignment).
 
-  feeder --(api_key + receiver_id + beast_id + wg_pubkey)--> registrar
-  registrar  resolves api_key -> owner, records adsb.receivers, returns the
-             WireGuard config of the shard the feeder was assigned.
-
-The api_key is OPTIONAL (feed-first, claim-later — the PiAware model): without
-it the registrar creates the receiver UNCLAIMED (owner NULL) and returns a
-claim_url the operator can open while logged in to bind it to their account
-later. Data flows either way. Re-registering an unclaimed receiver WITH a key
-upgrades it in place server-side.
+Registration is keyless, feed-first / claim-later (the PiAware model): the
+registrar creates the receiver UNCLAIMED (owner NULL) and returns a claim_url
+the operator opens while logged in to bind it to their account later. Data flows
+immediately; nothing about feeding waits on the claim.
 
 Thereafter the Beast stream is bound to the receiver by the WireGuard tunnel
 (source tunnel_ip) AND by the in-band beast_id (readsb --uuid), both of which
@@ -63,7 +59,6 @@ def derive_beast_id(receiver_uuid: str) -> str:
 def register_feeder(
     *,
     registrar_url: str,
-    api_key: str,
     receiver_id: str,
     wg_pubkey: str,
     beast_id: str = "",
@@ -79,8 +74,8 @@ def register_feeder(
 
     Retries while the registrar reports a transient, retryable condition (503 with
     retry=true, e.g. no shard has published itself yet). Raises RegistrationError
-    on a permanent rejection (bad key, receiver owned by another, auth not
-    configured) or once retries are exhausted.
+    on a permanent rejection (receiver owned by another, keyless registration not
+    enabled, auth not configured) or once retries are exhausted.
     """
     if not receiver_id:
         raise RegistrationError("receiver_id is required")
@@ -95,10 +90,8 @@ def register_feeder(
     # registrar assigns no shard/tunnel and returns the public Beast endpoint.
     if wg_pubkey:
         body["wg_pubkey"] = wg_pubkey
-    # api_key is optional: omitted => the receiver registers UNCLAIMED and the
-    # registrar returns a claim_url to bind it to an account later.
-    if api_key:
-        body["api_key"] = api_key
+    # No api_key is ever sent: the receiver registers UNCLAIMED and the registrar
+    # returns a claim_url to bind it to an account later (feed-first/claim-later).
     if name:
         body["name"] = name
     if lat is not None:
@@ -141,15 +134,10 @@ def register_feeder(
             continue
         # Permanent rejections — surface a clear, actionable message.
         if resp.status_code == 401:
-            if api_key:
-                raise RegistrationError(
-                    "invalid API key — check it at https://radar.dataero.eu/profile")
-            # No key was sent: this registrar doesn't accept anonymous
-            # registration (yet) — the operator has to provide a key after all.
+            # Keyless registration is not enabled on this registrar yet.
             raise RegistrationError(
-                "this registrar requires an API key (anonymous registration is "
-                "not enabled) — get one at https://radar.dataero.eu/profile and "
-                "re-run the installer")
+                "this registrar is not accepting keyless registrations yet — "
+                "please try again later")
         if resp.status_code == 403:
             raise RegistrationError(
                 "this receiver id is already registered to another account")
@@ -216,7 +204,6 @@ def _emit_shell(reg: dict) -> None:
 
 def main() -> int:
     registrar_url = os.getenv("REGISTRAR_URL", DEFAULT_REGISTRAR_URL)
-    api_key = os.getenv("API_KEY", "").strip()
     receiver_id = os.getenv("RECEIVER_UUID", "").strip()
     wg_pubkey = os.getenv("WG_PUBKEY", "").strip()
     name = os.getenv("FEEDER_NAME", "").strip()
@@ -228,7 +215,6 @@ def main() -> int:
     try:
         reg = register_feeder(
             registrar_url=registrar_url,
-            api_key=api_key,
             receiver_id=receiver_id,
             wg_pubkey=wg_pubkey,
             beast_id=derive_beast_id(receiver_id) if receiver_id else "",

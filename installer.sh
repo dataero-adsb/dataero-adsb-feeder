@@ -201,7 +201,7 @@ fi
 # ──────────────────────────────────────────────────────────────────────────
 # Feed mode — Beast + WireGuard (readsb only).
 #
-# The feeder registers with the Dataero registrar (API key -> owner), brings up
+# The feeder registers with the Dataero registrar, brings up
 # a WireGuard tunnel to its assigned hub (feeder/wg_setup.sh), and runs a
 # DEDICATED net-only readsb instance (dataero-readsb.service) that taps the local
 # decoder read-only and forwards a reduced Beast stream (with UUID) to that hub
@@ -211,12 +211,11 @@ fi
 # BUBBLE RULE: the installer does NOT modify or restart the shared decoder, so it
 # can never disturb other feeders (FR24, FlightAware, Adsb-Italia, ...). readsb is
 # required only as a Beast source on 127.0.0.1:30005 (its default output) — the
-# same port every other feeder taps. The HTTPS/json fallback was removed. The API
-# key (prompted below) is OPTIONAL: when given, registration binds the receiver
-# UUID + WireGuard peer to the account immediately; when skipped, the receiver
-# registers UNCLAIMED (feed-first, claim-later) and the registrar returns a
-# claim URL shown at the end of the install. Thereafter the tunnel address +
-# in-band UUID re-prove identity either way.
+# same port every other feeder taps. The HTTPS/json fallback was removed. Every
+# install registers the receiver UNCLAIMED (feed-first, claim-later — the PiAware
+# model): it feeds immediately and the registrar returns a claim URL shown at the
+# end of the install, which the operator opens (signed in) to bind it to their
+# account later. The tunnel address + in-band UUID prove identity on the wire.
 # ──────────────────────────────────────────────────────────────────────────
 echo ""
 if [ "$DATA_SOURCE_UNIT" != "readsb.service" ]; then
@@ -229,7 +228,7 @@ fi
 FEED_MODE="beast"
 echo "📡 Beast + WireGuard mode — this device will register with Dataero, bring up a"
 echo "   WireGuard tunnel to its assigned hub, and readsb will forward reduced Beast"
-echo "   (with UUID) over that tunnel (configured right after the API key step)."
+echo "   (with UUID) over that tunnel (configured next)."
 
 # Registrar base URL (HTTPS, behind HAProxy). Overridable for staging.
 REGISTRAR_URL="${REGISTRAR_URL:-https://adsb.dataero.eu}"
@@ -258,18 +257,6 @@ pip install -r "$INSTALL_DIR/requirements.txt"
 deactivate
 echo "✅ Virtual environment ready."
 
-# Determine API key. On a reinstall, an existing .env may already hold one —
-# offer to keep it so the operator doesn't have to dig up the key again. The
-# key is shown masked (first 4 + last 4) to avoid exposing the full secret in
-# terminal scrollback.
-EXISTING_KEY=""
-if [ -f "$INSTALL_DIR/.env" ]; then
-    EXISTING_KEY=$(sudo grep -E '^API_KEY=' "$INSTALL_DIR/.env" 2>/dev/null | head -1 | cut -d= -f2-)
-    # Strip surrounding quotes if the file was hand-edited.
-    EXISTING_KEY="${EXISTING_KEY%\"}"; EXISTING_KEY="${EXISTING_KEY#\"}"
-    EXISTING_KEY="${EXISTING_KEY%\'}"; EXISTING_KEY="${EXISTING_KEY#\'}"
-fi
-
 # Reuse an existing receiver UUID + WireGuard private key across reinstalls so the
 # account binding and the registered peer identity stay stable (read BEFORE .env
 # is rewritten below). Regenerating the WG key would orphan the peer the hub knows.
@@ -292,46 +279,17 @@ if [ -f "$INSTALL_DIR/.env" ]; then
     EXISTING_FEEDER_ALT_M=$(sudo grep -E '^FEEDER_ALT_M=' "$INSTALL_DIR/.env" 2>/dev/null | head -1 | cut -d= -f2-)
 fi
 
-API_KEY=""
-if [ -n "$EXISTING_KEY" ]; then
-    KEY_LEN=${#EXISTING_KEY}
-    if [ "$KEY_LEN" -gt 8 ]; then
-        MASKED_KEY="${EXISTING_KEY:0:4}...${EXISTING_KEY: -4}"
-    else
-        MASKED_KEY="(short key)"
-    fi
-    echo "🔑 An existing API key was found in $INSTALL_DIR/.env: $MASKED_KEY ($KEY_LEN chars)"
-    # Default to keeping the key on bare Enter. The previous behaviour treated
-    # empty input as "no" and then prompted again for a fresh key — a second
-    # Enter there silently wrote an empty API_KEY to .env and the feeder
-    # failed auth on the very first POST. "(Y/n)" signals the default.
-    read -p "🔑 Keep this key? (Y/n): " KEEP_KEY
-    if [[ -z "$KEEP_KEY" || "$KEEP_KEY" =~ ^(y|yes|Y|YES)$ ]]; then
-        API_KEY="$EXISTING_KEY"
-        echo "✅ Reusing existing API key."
-    fi
-fi
-
-if [ -z "$API_KEY" ]; then
-    echo "🔑 An API key links this receiver to your Dataero account right away"
-    echo "   (get one at https://radar.dataero.eu/profile)."
-    echo "   Don't have one? Just press Enter — the receiver will feed anyway, and"
-    echo "   a link to claim it for your account is shown at the end of the install."
-    read -p "🔑 Enter your Dataero API key (or press Enter to skip): " API_KEY
-    [ -z "$API_KEY" ] && echo "➡️  No key — registering this receiver as unclaimed (claim it later)."
-fi
-
-# Persist API key plus the detected readsb aircraft.json path. READSB_DATA is
-# written explicitly rather than relying on main.py's default.
-echo "API_KEY=$API_KEY"             | sudo tee    "$INSTALL_DIR/.env" > /dev/null
-echo "READSB_DATA=$DATA_SOURCE_FILE" | sudo tee -a "$INSTALL_DIR/.env" > /dev/null
+# Persist the detected readsb aircraft.json path. READSB_DATA is written
+# explicitly rather than relying on main.py's default; this is the file-creating
+# (truncating) write.
+echo "READSB_DATA=$DATA_SOURCE_FILE" | sudo tee    "$INSTALL_DIR/.env" > /dev/null
 # FEED_MODE tells main.py what to do; the installer only ever sets "beast" =>
 # heartbeat only, while readsb pushes reduced Beast over the WireGuard tunnel.
 echo "FEED_MODE=$FEED_MODE"          | sudo tee -a "$INSTALL_DIR/.env" > /dev/null
-echo "✅ Configuration saved (API key, data source: $DATA_SOURCE_FILE, feed mode: $FEED_MODE)."
+echo "✅ Configuration saved (data source: $DATA_SOURCE_FILE, feed mode: $FEED_MODE)."
 
-# Direct Beast mode (ADSB-34, ADSBexchange model): register with Dataero
-# (api_key -> owner), then point readsb straight at the PUBLIC hub endpoint over
+# Direct Beast mode (ADSB-34, ADSBexchange model): register with Dataero,
+# then point readsb straight at the PUBLIC hub endpoint over
 # plain TCP — no WireGuard tunnel. The feed runs as a DEDICATED net-only readsb
 # instance (dataero-readsb.service) that taps the local decoder read-only — it
 # does NOT modify or restart the shared readsb, so other feeders are never
@@ -422,7 +380,7 @@ if [ "$FEED_MODE" = "beast" ]; then
     # config as shell KEY=VALUE lines (or exits non-zero with a clear message).
     # No WG_PUBKEY is passed, so register.py omits wg_pubkey and the registrar
     # returns a DIRECT (tunnel-less) assignment with the public Beast endpoint.
-    REG_VARS=$(REGISTRAR_URL="$REGISTRAR_URL" API_KEY="$API_KEY" \
+    REG_VARS=$(REGISTRAR_URL="$REGISTRAR_URL" \
         RECEIVER_UUID="$RECEIVER_UUID" \
         FEEDER_NAME="$FEEDER_NAME" FEEDER_LAT="$FEEDER_LAT" \
         FEEDER_LON="$FEEDER_LON" FEEDER_ALT_M="$FEEDER_ALT_M" \
@@ -433,8 +391,8 @@ if [ "$FEED_MODE" = "beast" ]; then
         }
     # Sets BEAST_ID SHARD TUNNEL_IP ENABLED BEAST_HOST BEAST_PORT, MLAT_ENABLED
     # MLAT_REASON MLAT_SERVER_HOST MLAT_SERVER_PORT (epic ADSB-17), and CLAIM_URL
-    # (set only when registering without an API key). In direct mode SHARD/
-    # TUNNEL_IP and the WG_* fields are empty.
+    # (the link to bind this unclaimed receiver to an account). In direct mode
+    # SHARD/TUNNEL_IP and the WG_* fields are empty.
     eval "$REG_VARS"
     if [ -z "$BEAST_HOST" ] || [ -z "$BEAST_PORT" ]; then
         echo "❌ Registration response was incomplete (no Beast endpoint):"
@@ -448,7 +406,7 @@ if [ "$FEED_MODE" = "beast" ]; then
     # True/False); normalise to lowercase for .env + reinstall reuse.
     MLAT_EFFECTIVE="false"; [[ "${MLAT_ENABLED,,}" =~ ^(1|true|yes)$ ]] && MLAT_EFFECTIVE="true"
 
-    # Persist identity + hub config. .env holds secrets (API key, WG private key),
+    # Persist identity + hub config. .env holds secrets (WG private key),
     # so lock it down.
     {
         echo "REGISTRAR_URL=$REGISTRAR_URL"
@@ -469,8 +427,8 @@ if [ "$FEED_MODE" = "beast" ]; then
         echo "MLAT_ENABLED=$MLAT_EFFECTIVE"
         echo "MLAT_SERVER_HOST=$MLAT_SERVER_HOST"
         echo "MLAT_SERVER_PORT=$MLAT_SERVER_PORT"
-        # Informational: non-empty only while the receiver is unclaimed (no API
-        # key at registration) — kept so the operator can find the link again.
+        # Informational: the claim link for this unclaimed receiver — kept so the
+        # operator can find it again to bind the receiver to their account.
         echo "CLAIM_URL=$CLAIM_URL"
     } | sudo tee -a "$INSTALL_DIR/.env" > /dev/null
     sudo chmod 600 "$INSTALL_DIR/.env"
@@ -611,8 +569,8 @@ if [ "$RUN_API_TEST" = "yes" ]; then
             echo "   ℹ️  Confirm the stream is attributed on the Dataero server side (feeder list / message counter)."
             ;;
         401|403)
-            echo "❌ API rejected your credentials (HTTP $HTTP_CODE)."
-            echo "   Check your API key on https://radar.dataero.eu/profile and edit $INSTALL_DIR/.env"
+            echo "❌ Registrar refused the heartbeat (HTTP $HTTP_CODE)."
+            echo "   This receiver may have been disabled or claimed by another account."
             echo "   Response body:"
             sed 's/^/     /' "$RESP_BODY"
             rm -f "$RESP_BODY"
@@ -648,35 +606,33 @@ echo ""
 echo "🎉 Installation complete. dataero-readsb.service forwards reduced Beast (uuid $RECEIVER_UUID) over the WireGuard tunnel to hub $BEAST_HOST:$BEAST_PORT (shard $SHARD) — the shared decoder is untouched; the feeder heartbeats $REGISTRAR_URL."
 echo ""
 
-# Feed-first, claim-later: registered without an API key => the receiver is
-# feeding but not yet linked to an account. Show the claim link prominently —
+# Feed-first, claim-later: every install registers the receiver UNCLAIMED — it
+# is feeding but not yet linked to an account. Show the claim link prominently —
 # this is the operator's one pointer to it (also kept in .env as CLAIM_URL).
 # The link is the WHOLE point: it carries the right UUID, so there's nothing to
 # type. The explicit ultrafeeder warning below is deliberate — operators coming
 # from FR24/ADSBx/PiAware reflexively paste their ultrafeeder UUID, which is a
 # DIFFERENT id and yields "receiver not found" on the claim page.
-if [ -z "$API_KEY" ]; then
-    echo "📌 This receiver is feeding, but it is NOT YET LINKED to a Dataero account."
+echo "📌 This receiver is feeding, but it is NOT YET LINKED to a Dataero account."
+echo ""
+if [ -n "$CLAIM_URL" ]; then
+    echo "   ✅ To claim it, just OPEN THIS LINK while signed in at radar.dataero.eu:"
     echo ""
-    if [ -n "$CLAIM_URL" ]; then
-        echo "   ✅ To claim it, just OPEN THIS LINK while signed in at radar.dataero.eu:"
-        echo ""
-        echo "       👉 $CLAIM_URL"
-        echo ""
-        echo "      Nothing to type — the link already carries the right UUID."
-    else
-        echo "   ✅ Sign in at https://radar.dataero.eu, open \"Claim a receiver\", and"
-        echo "      paste THIS Dataero receiver UUID:"
-        echo ""
-        echo "          $RECEIVER_UUID"
-    fi
+    echo "       👉 $CLAIM_URL"
     echo ""
-    echo "   ⚠️  Use the Dataero UUID above — NOT your ultrafeeder / readsb UUID."
-    echo "      They are different ids; the ultrafeeder one gives \"receiver not found\"."
-    echo "      (Lost the link? Re-run this installer, or read it back with:"
-    echo "       sudo grep RECEIVER_UUID $INSTALL_DIR/.env — then claim at radar.dataero.eu/claim.)"
+    echo "      Nothing to type — the link already carries the right UUID."
+else
+    echo "   ✅ Sign in at https://radar.dataero.eu, open \"Claim a receiver\", and"
+    echo "      paste THIS Dataero receiver UUID:"
     echo ""
+    echo "          $RECEIVER_UUID"
 fi
+echo ""
+echo "   ⚠️  Use the Dataero UUID above — NOT your ultrafeeder / readsb UUID."
+echo "      They are different ids; the ultrafeeder one gives \"receiver not found\"."
+echo "      (Lost the link? Read the Dataero UUID back with:"
+echo "       sudo grep RECEIVER_UUID $INSTALL_DIR/.env — then claim at radar.dataero.eu/claim.)"
+echo ""
 echo "   ✈️  Reminder: the bytes you're now relaying were lovingly decoded by"
 echo "      readsb (https://github.com/wiedehopf/readsb). If you ever bump"
 echo "      into wiedehopf or a readsb maintainer in the wild, buy them a"
