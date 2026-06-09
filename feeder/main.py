@@ -29,7 +29,7 @@ FEEDER_VERSION = "1.2.0"
 #     TCP. No tunnel. Identity is the in-band beast_id only.
 #   * LEGACY: readsb sends Beast to the hub's overlay address over a WireGuard
 #     tunnel set up at install. Kept working until the fleet has migrated.
-# Identity is bound to the account at registration (api_key -> owner). This process
+# Identity is the receiver_id established at registration. This process
 # does NOT POST aircraft data; its only job is the registrar heartbeat (liveness /
 # last_seen_at) and applying any reassignment the heartbeat announces.
 REGISTRAR_URL = os.getenv("REGISTRAR_URL", "https://adsb.dataero.eu").rstrip("/")
@@ -287,7 +287,7 @@ def maybe_apply_config(resp):
 def send_registrar_heartbeat():
     """POST a heartbeat to the Dataero registrar, keyed on this feeder's
     receiver_id (established at registration). Bumps last_seen_at server side.
-    No bearer token — identity is the receiver_id, not the API key. An
+    No bearer token — identity is the receiver_id established at registration. An
     ok=false / 404 means the receiver is unknown or disabled (e.g. removed in the
     portal); surface it so the operator knows to re-run the installer.
 

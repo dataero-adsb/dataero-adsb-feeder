@@ -21,14 +21,25 @@ sudo bash installer.sh
 ```
 
 ### 2. Answer the prompts
-- **API key** — press **Enter to skip** (you can link the receiver to an account later, see below). If you already have one ([radar.dataero.eu](https://radar.dataero.eu) → **Profile** → **Request API Key**), paste it to link immediately.
+No account is needed to start feeding — the installer never asks for an API key. The only prompts are:
+- **Station name** — optional, press **Enter to skip**.
 - **MLAT?** (optional — see below) Answer `y` or `N`.
+- **Position** — only if you enabled MLAT (latitude, longitude, altitude).
 
 When it finishes, your feeder is live. ✈️
 
-## Claim your receiver (if you skipped the API key)
+## Claim your receiver
 
-Your receiver feeds either way — claiming it just links it to your Dataero account so you can see your stats and manage it. The installer prints a **claim link** at the end (also saved as `CLAIM_URL` in `/usr/local/dataero-adsb-feeder/.env`): open it in a browser while signed in at [radar.dataero.eu](https://radar.dataero.eu). Or simply re-run the installer with an API key.
+Every install registers your receiver as **unclaimed** — it feeds immediately, and claiming it later just links it to your Dataero account so you can see your stats and manage it. There are two ways:
+
+- **Open the claim link.** The installer prints a **claim link** at the end (also saved as `CLAIM_URL` in `/usr/local/dataero-adsb-feeder/.env`): open it in a browser while signed in at [radar.dataero.eu](https://radar.dataero.eu). The link already carries the right id — nothing to type.
+- **Paste your receiver UUID.** Sign in at [radar.dataero.eu](https://radar.dataero.eu), go to **Claim a receiver** ([radar.dataero.eu/claim](https://radar.dataero.eu/claim)), and paste your **Dataero receiver UUID**.
+
+> ⚠️ This **Dataero receiver UUID is NOT your `ultrafeeder`/`readsb` UUID** — they are different ids. Using the ultrafeeder one gives "receiver not found". Read the correct Dataero UUID with:
+>
+> ```bash
+> sudo grep RECEIVER_UUID /usr/local/dataero-adsb-feeder/.env
+> ```
 
 ## Optional: enable MLAT
 
@@ -61,8 +72,7 @@ Surgical: removes only Dataero's services (`dataero-feeder`/`dataero-readsb`/`da
 | Problem | Fix |
 |---|---|
 | Service won't start | Make sure `readsb` runs: `sudo systemctl start readsb`, then re-run the installer. |
-| Authentication error | Re-check your API key on your [profile](https://radar.dataero.eu/profile) and re-run the installer. |
-| No data on radar | Check the tunnel: `sudo wg show wg-adsb` (a recent handshake = OK). If not, re-run the installer. |
+| No data on radar | Check the feeder is running: `sudo systemctl status dataero-feeder.service`, and watch the logs: `sudo journalctl -u dataero-feeder.service -f`. If it isn't running, re-run the installer. |
 | MLAT not working | Needs ≥3 nearby receivers + an accurate position. Check `sudo journalctl -u dataero-mlat.service`. |
 
 Config lives in `/usr/local/dataero-adsb-feeder/.env`. Set `DEBUG=TRUE` there (then restart the service) for verbose logs.
