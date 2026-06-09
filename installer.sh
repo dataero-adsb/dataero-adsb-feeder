@@ -607,31 +607,22 @@ echo "🎉 Installation complete. dataero-readsb.service forwards reduced Beast 
 echo ""
 
 # Feed-first, claim-later: every install registers the receiver UNCLAIMED — it
-# is feeding but not yet linked to an account. Show the claim link prominently —
-# this is the operator's one pointer to it (also kept in .env as CLAIM_URL).
-# The link is the WHOLE point: it carries the right UUID, so there's nothing to
-# type. The explicit ultrafeeder warning below is deliberate — operators coming
-# from FR24/ADSBx/PiAware reflexively paste their ultrafeeder UUID, which is a
-# DIFFERENT id and yields "receiver not found" on the claim page.
+# is feeding but not yet linked to an account. The operator claims it in the web
+# UI by pasting the receiver UUID below — claiming lives ONLY in the profile
+# "Receiver" tab now (the standalone /claim page was removed). The explicit
+# ultrafeeder warning is deliberate: operators from FR24/ADSBx/PiAware reflexively
+# paste their ultrafeeder UUID, a DIFFERENT id that yields "receiver not found".
 echo "📌 This receiver is feeding, but it is NOT YET LINKED to a Dataero account."
 echo ""
-if [ -n "$CLAIM_URL" ]; then
-    echo "   ✅ To claim it, just OPEN THIS LINK while signed in at radar.dataero.eu:"
-    echo ""
-    echo "       👉 $CLAIM_URL"
-    echo ""
-    echo "      Nothing to type — the link already carries the right UUID."
-else
-    echo "   ✅ Sign in at https://radar.dataero.eu, open \"Claim a receiver\", and"
-    echo "      paste THIS Dataero receiver UUID:"
-    echo ""
-    echo "          $RECEIVER_UUID"
-fi
+echo "   ✅ To claim it: sign in at https://radar.dataero.eu, open your"
+echo "      profile → Receiver tab, and paste THIS Dataero receiver UUID into"
+echo "      \"Link a receiver\":"
+echo ""
+echo "          $RECEIVER_UUID"
 echo ""
 echo "   ⚠️  Use the Dataero UUID above — NOT your ultrafeeder / readsb UUID."
 echo "      They are different ids; the ultrafeeder one gives \"receiver not found\"."
-echo "      (Lost the link? Read the Dataero UUID back with:"
-echo "       sudo grep RECEIVER_UUID $INSTALL_DIR/.env — then claim at radar.dataero.eu/claim.)"
+echo "      (Lost it? Read it back with: sudo grep RECEIVER_UUID $INSTALL_DIR/.env)"
 echo ""
 echo "   ✈️  Reminder: the bytes you're now relaying were lovingly decoded by"
 echo "      readsb (https://github.com/wiedehopf/readsb). If you ever bump"
