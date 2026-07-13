@@ -199,36 +199,36 @@ if [ -n "$DATA_SOURCE_UNIT" ]; then
 fi
 
 # ──────────────────────────────────────────────────────────────────────────
-# Feed mode — Beast + WireGuard (readsb only).
+# Feed mode — direct reduced Beast over TCP (readsb only; ADSB-34).
 #
-# The feeder registers with the Dataero registrar, brings up
-# a WireGuard tunnel to its assigned hub (feeder/wg_setup.sh), and runs a
-# DEDICATED net-only readsb instance (dataero-readsb.service) that taps the local
-# decoder read-only and forwards a reduced Beast stream (with UUID) to that hub
-# over the tunnel (feeder/configure_readsb_reduce.sh). main.py then only
-# heartbeats the registrar.
+# The feeder registers with the Dataero registrar, which assigns a PUBLIC
+# ingest hub endpoint. A DEDICATED net-only readsb instance
+# (dataero-readsb.service) taps the local decoder read-only and forwards a
+# reduced Beast stream (with UUID) straight to that hub over plain TCP
+# (feeder/configure_readsb_reduce.sh). main.py then only heartbeats the
+# registrar. The in-band UUID proves identity on the wire.
 #
 # BUBBLE RULE: the installer does NOT modify or restart the shared decoder, so it
 # can never disturb other feeders (FR24, FlightAware, Adsb-Italia, ...). readsb is
 # required only as a Beast source on 127.0.0.1:30005 (its default output) — the
 # same port every other feeder taps. The HTTPS/json fallback was removed. Every
 # install registers the receiver UNCLAIMED (feed-first, claim-later — the PiAware
-# model): it feeds immediately and the registrar returns a claim URL shown at the
-# end of the install, which the operator opens (signed in) to bind it to their
-# account later. The tunnel address + in-band UUID prove identity on the wire.
+# model): it feeds immediately, and the operator later binds it to their account
+# from the radar.dataero.eu profile → Receiver tab using the receiver UUID
+# printed at the end of the install.
 # ──────────────────────────────────────────────────────────────────────────
 echo ""
 if [ "$DATA_SOURCE_UNIT" != "readsb.service" ]; then
-    echo "❌ This feeder requires readsb — it feeds Dataero via Beast + WireGuard,"
-    echo "   which relies on readsb's native beast_reduce_plus_out connector."
+    echo "❌ This feeder requires readsb — it feeds Dataero via a direct reduced"
+    echo "   Beast stream, which relies on readsb's native beast_reduce_plus_out connector."
     echo "   Detected decoder: ${DATA_SOURCE_UNIT:-${DATA_SOURCE_FILE:-none}}."
     echo "   Install readsb (https://github.com/wiedehopf/readsb) and re-run this installer."
     exit 1
 fi
 FEED_MODE="beast"
-echo "📡 Beast + WireGuard mode — this device will register with Dataero, bring up a"
-echo "   WireGuard tunnel to its assigned hub, and readsb will forward reduced Beast"
-echo "   (with UUID) over that tunnel (configured next)."
+echo "📡 Direct Beast mode — this device will register with Dataero, and readsb will"
+echo "   forward reduced Beast (with UUID) straight to its assigned ingest hub over"
+echo "   plain TCP (configured next)."
 
 # Registrar base URL (HTTPS, behind HAProxy). Overridable for staging.
 REGISTRAR_URL="${REGISTRAR_URL:-https://adsb.dataero.eu}"
@@ -257,11 +257,10 @@ pip install -r "$INSTALL_DIR/requirements.txt"
 deactivate
 echo "✅ Virtual environment ready."
 
-# Reuse an existing receiver UUID + WireGuard private key across reinstalls so the
-# account binding and the registered peer identity stay stable (read BEFORE .env
-# is rewritten below). Regenerating the WG key would orphan the peer the hub knows.
+# Reuse an existing receiver UUID across reinstalls so the account binding and
+# the registered receiver identity stay stable (read BEFORE .env is rewritten
+# below). Regenerating the UUID would orphan the receiver the hub knows.
 EXISTING_UUID=""
-EXISTING_WG_PRIVKEY=""
 # MLAT opt-in + surveyed position are also reused across reinstalls (epic ADSB-17)
 # so the operator doesn't re-enter the antenna survey every time.
 EXISTING_MLAT_ENABLED=""
@@ -271,7 +270,6 @@ EXISTING_FEEDER_LON=""
 EXISTING_FEEDER_ALT_M=""
 if [ -f "$INSTALL_DIR/.env" ]; then
     EXISTING_UUID=$(sudo grep -E '^RECEIVER_UUID=' "$INSTALL_DIR/.env" 2>/dev/null | head -1 | cut -d= -f2-)
-    EXISTING_WG_PRIVKEY=$(sudo grep -E '^WG_PRIVKEY=' "$INSTALL_DIR/.env" 2>/dev/null | head -1 | cut -d= -f2-)
     EXISTING_MLAT_ENABLED=$(sudo grep -E '^MLAT_ENABLED=' "$INSTALL_DIR/.env" 2>/dev/null | head -1 | cut -d= -f2-)
     EXISTING_FEEDER_NAME=$(sudo grep -E '^FEEDER_NAME=' "$INSTALL_DIR/.env" 2>/dev/null | head -1 | cut -d= -f2-)
     EXISTING_FEEDER_LAT=$(sudo grep -E '^FEEDER_LAT=' "$INSTALL_DIR/.env" 2>/dev/null | head -1 | cut -d= -f2-)
@@ -284,22 +282,22 @@ fi
 # (truncating) write.
 echo "READSB_DATA=$DATA_SOURCE_FILE" | sudo tee    "$INSTALL_DIR/.env" > /dev/null
 # FEED_MODE tells main.py what to do; the installer only ever sets "beast" =>
-# heartbeat only, while readsb pushes reduced Beast over the WireGuard tunnel.
+# heartbeat only, while readsb pushes reduced Beast directly to the hub.
 echo "FEED_MODE=$FEED_MODE"          | sudo tee -a "$INSTALL_DIR/.env" > /dev/null
 echo "✅ Configuration saved (data source: $DATA_SOURCE_FILE, feed mode: $FEED_MODE)."
 
 # Direct Beast mode (ADSB-34, ADSBexchange model): register with Dataero,
 # then point readsb straight at the PUBLIC hub endpoint over
-# plain TCP — no WireGuard tunnel. The feed runs as a DEDICATED net-only readsb
+# plain TCP. The feed runs as a DEDICATED net-only readsb
 # instance (dataero-readsb.service) that taps the local decoder read-only — it
 # does NOT modify or restart the shared readsb, so other feeders are never
 # disturbed (see feeder/configure_readsb_reduce.sh). Identity is the in-band
 # beast_id (readsb --uuid); the daemon (main.py) stays able to apply a legacy
-# WireGuard assignment too if the server ever sends one (dual-mode).
+# tunnel assignment too if the server ever sends one (dual-mode).
 if [ "$FEED_MODE" = "beast" ]; then
-    # Migrating a feeder off the old WireGuard path: tear down the leftover tunnel
-    # so it stops dialing the overlay (BUBBLE RULE — only OUR interface, never
-    # another feeder's WireGuard).
+    # Migrating a feeder off the retired WireGuard path: tear down the leftover
+    # tunnel so it stops dialing the overlay (BUBBLE RULE — only OUR interface,
+    # never another feeder's tunnel).
     if [ -f /etc/wireguard/wg-adsb.conf ]; then
         echo "🧹 Removing the legacy Dataero WireGuard tunnel (moving to direct Beast)..."
         sudo wg-quick down wg-adsb 2>/dev/null || true
@@ -392,7 +390,7 @@ if [ "$FEED_MODE" = "beast" ]; then
     # Sets BEAST_ID SHARD TUNNEL_IP ENABLED BEAST_HOST BEAST_PORT, MLAT_ENABLED
     # MLAT_REASON MLAT_SERVER_HOST MLAT_SERVER_PORT (epic ADSB-17), and CLAIM_URL
     # (the link to bind this unclaimed receiver to an account). In direct mode
-    # SHARD/TUNNEL_IP and the WG_* fields are empty.
+    # SHARD/TUNNEL_IP are empty.
     eval "$REG_VARS"
     if [ -z "$BEAST_HOST" ] || [ -z "$BEAST_PORT" ]; then
         echo "❌ Registration response was incomplete (no Beast endpoint):"
@@ -406,8 +404,7 @@ if [ "$FEED_MODE" = "beast" ]; then
     # True/False); normalise to lowercase for .env + reinstall reuse.
     MLAT_EFFECTIVE="false"; [[ "${MLAT_ENABLED,,}" =~ ^(1|true|yes)$ ]] && MLAT_EFFECTIVE="true"
 
-    # Persist identity + hub config. .env holds secrets (WG private key),
-    # so lock it down.
+    # Persist identity + hub config. .env may hold secrets, so lock it down.
     {
         echo "REGISTRAR_URL=$REGISTRAR_URL"
         echo "RECEIVER_UUID=$RECEIVER_UUID"
@@ -433,9 +430,9 @@ if [ "$FEED_MODE" = "beast" ]; then
     } | sudo tee -a "$INSTALL_DIR/.env" > /dev/null
     sudo chmod 600 "$INSTALL_DIR/.env"
 
-    # Direct mode: no tunnel to bring up — readsb dials the public Beast endpoint
-    # straight over TCP. (feeder/wg_setup.sh is retained for the daemon's dual-mode
-    # path but is not invoked on a direct install.)
+    # Direct mode: readsb dials the public Beast endpoint straight over TCP.
+    # (feeder/wg_setup.sh is retained for the daemon's legacy dual-mode path but
+    # is not invoked on a direct install.)
     echo "🔧 Setting up the Dataero feed (dedicated net-only readsb instance; the shared decoder is NOT modified) -> $BEAST_HOST:$BEAST_PORT ..."
     UUID="$RECEIVER_UUID" HUB_HOST="$BEAST_HOST" HUB_PORT="$BEAST_PORT" REDUCE_INTERVAL="$REDUCE_INTERVAL" \
         LOCAL_BEAST_PORT="${LOCAL_BEAST_PORT:-30005}" \
@@ -526,9 +523,9 @@ echo "✅ Service is active."
 
 # 2. Live API test (beast mode): POST a registrar heartbeat keyed on the
 #    receiver_id. Aircraft data does NOT flow through this POST (readsb forwards
-#    reduced Beast over the WireGuard tunnel), so the meaningful client-side check
-#    is that the heartbeat is accepted (proving the receiver is registered +
-#    enabled). The WireGuard handshake is checked separately below.
+#    reduced Beast directly to the hub), so the meaningful client-side check is
+#    that the heartbeat is accepted (proving the receiver is registered +
+#    enabled).
 #    curl exits non-zero only on transport failures; 4xx/5xx come back as the
 #    HTTP status code, inspected explicitly below.
 if ! command -v curl &> /dev/null; then
@@ -539,18 +536,8 @@ fi
 RUN_API_TEST="yes"
 CURL_DATA=()
 if [ "$FEED_MODE" = "beast" ]; then
-    # WireGuard handshake check: a fresh tunnel should complete a handshake within
-    # a few seconds of coming up. No handshake => endpoint/key/firewall problem.
-    echo "🔐 Checking the WireGuard handshake to the hub..."
-    WG_HS=$(sudo wg show wg-adsb latest-handshakes 2>/dev/null | awk '{print $2}' | head -1)
-    if [ -n "$WG_HS" ] && [ "$WG_HS" != "0" ]; then
-        echo "✅ WireGuard handshake established with the hub."
-    else
-        echo "⚠️  No WireGuard handshake yet. The tunnel may still be settling; check with:"
-        echo "     sudo wg show wg-adsb"
-    fi
     TEST_URL="$REGISTRAR_URL/receivers/heartbeat"
-    TEST_LABEL="registrar heartbeat (aircraft data flows via Beast over WireGuard, not this POST)"
+    TEST_LABEL="registrar heartbeat (aircraft data flows via the direct Beast stream, not this POST)"
     CURL_DATA=(--data "{\"receiver_id\": \"$RECEIVER_UUID\"}")
     # The registrar heartbeat is keyed on receiver_id; no bearer token.
 fi
@@ -565,7 +552,7 @@ if [ "$RUN_API_TEST" = "yes" ]; then
         "$TEST_URL" || echo "000")
     case "$HTTP_CODE" in
         2*)
-            echo "✅ Registrar accepted the heartbeat (HTTP $HTTP_CODE). This receiver is registered + enabled; dataero-readsb.service is forwarding reduced Beast over the tunnel."
+            echo "✅ Registrar accepted the heartbeat (HTTP $HTTP_CODE). This receiver is registered + enabled; dataero-readsb.service is forwarding reduced Beast directly to the hub."
             echo "   ℹ️  Confirm the stream is attributed on the Dataero server side (feeder list / message counter)."
             ;;
         401|403)
@@ -603,7 +590,7 @@ if ! systemctl is-active --quiet dataero-feeder.service; then
 fi
 
 echo ""
-echo "🎉 Installation complete. dataero-readsb.service forwards reduced Beast (uuid $RECEIVER_UUID) over the WireGuard tunnel to hub $BEAST_HOST:$BEAST_PORT (shard $SHARD) — the shared decoder is untouched; the feeder heartbeats $REGISTRAR_URL."
+echo "🎉 Installation complete. dataero-readsb.service forwards reduced Beast (uuid $RECEIVER_UUID) directly to hub $BEAST_HOST:$BEAST_PORT — the shared decoder is untouched; the feeder heartbeats $REGISTRAR_URL."
 echo ""
 
 # Feed-first, claim-later: every install registers the receiver UNCLAIMED — it
