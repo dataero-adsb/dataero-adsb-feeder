@@ -262,6 +262,10 @@ def maybe_apply_config(resp):
             "HUB_PORT": agg["beast_port"],
             "REDUCE_INTERVAL": os.getenv("REDUCE_INTERVAL", "0.25"),
             "LOCAL_BEAST_PORT": os.getenv("LOCAL_BEAST_PORT", "30005"),
+            # ADSB-71: decoder output read by the forwarder (Beast or AVR raw).
+            "LOCAL_SOURCE_PORT": os.getenv("LOCAL_SOURCE_PORT", os.getenv("LOCAL_BEAST_PORT", "30005")),
+            "LOCAL_SOURCE_FORMAT": os.getenv("LOCAL_SOURCE_FORMAT", "beast"),
+            "READSB_BIN": os.getenv("READSB_BIN", ""),
         })
     except Exception as e:
         _last_reconfig_fail_ts = time.time()

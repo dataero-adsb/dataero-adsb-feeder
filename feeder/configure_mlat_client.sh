@@ -49,8 +49,9 @@ fi
 sudo bash -c "cat > $SERVICE_FILE" <<EOL
 [Unit]
 Description=Dataero MLAT client (multilateration)
-Requires=readsb.service
-After=readsb.service network-online.target
+# ADSB-71: no Requires= on the decoder - it may be fr24feed's dump1090, readsb
+# or anything else, and starting MLAT must never start (or pull in) it.
+After=network-online.target readsb.service
 
 [Service]
 ExecStart=$MLAT_VENV/bin/python $MLAT_VENV/bin/mlat-client \\

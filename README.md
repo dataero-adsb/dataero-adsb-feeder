@@ -36,10 +36,23 @@ Your receiver is identified on the wire by a UUID generated during installation.
 
 ---
 
+## Feeding Dataero next to Flightradar24 (or any other network)
+
+The Dataero client is built to run **in parallel** with an existing feed — a Flightradar24 Pi24 image (fr24feed + dump1090), a PiAware image, readsb, ultrafeeder — **without interacting with it**:
+
+* The Dataero forwarder (`dataero-readsb.service`) is a separate **net-only** readsb. On a device that has no readsb of its own (Pi24, PiAware), the installer builds one into `/usr/local/dataero-adsb-feeder/bin/` **without any SDR driver** — it cannot open the radio dongle, so it can never take it from fr24feed or dump1090.
+* It reads your decoder's output on `127.0.0.1` as **one more reader**, exactly as fr24feed and every other feeder do: Beast on port `30005` first, otherwise the raw (AVR) output on port `30002`. The format is decided from the data actually received.
+* The installer **never starts, stops, restarts, enables, disables or edits** a service or a config file that is not `dataero-*`, never adds a dependency on one, and never offers to install a decoder when one is already present.
+* At the end it compares every other feeder/decoder service with the state it had before the install (same state, same process ID) and prints the result, so you can see that FR24 was not restarted.
+
+Same commands as below (`git clone …`, `sudo bash installer.sh`). If your decoder offers neither port, the installer stops with an explanation and changes nothing. MLAT needs the Beast output (port 30005); with the raw output only, ADS-B feeding works and MLAT is skipped.
+
+---
+
 ## Prerequisites
 
 * A **Raspberry Pi** (or any Debian-based Linux system: Raspberry Pi OS, Debian, Ubuntu) with an ADS-B receiver
-* **[`readsb`](https://github.com/wiedehopf/readsb)** installed and running — required, since the feed uses readsb's native `beast_reduce_plus_out` connector. **If you don't have a decoder yet, the installer offers to install readsb for you.**
+* A running ADS-B decoder — readsb, dump1090 (Flightradar24 Pi24, PiAware) or anything offering Beast on port `30005` or raw on port `30002`. **If the device has no decoder and no feeder at all, the installer offers to install readsb for you.** The Dataero forwarder itself is readsb's `beast_reduce_plus_out` connector; when the device has no readsb binary, a net-only one (no SDR driver) is built for it.
 * **Python 3.7+** (present on any current OS image; the installer installs missing pieces)
 * An active internet connection
 
@@ -176,8 +189,8 @@ sudo journalctl -u dataero-readsb.service -f
 
 | Problem | Likely cause | Solution |
 | --- | --- | --- |
-| Installer aborts: decoder not readsb | The feed requires readsb's `beast_reduce_plus_out` connector | Install [readsb](https://github.com/wiedehopf/readsb) and re-run the installer |
-| Services fail to start | `readsb` not running | `sudo systemctl start readsb` and retry |
+| Installer stops: "does not offer an output Dataero can read" | Nothing answers on 127.0.0.1:30005 (Beast) or :30002 (raw) | Turn on your decoder's Beast output, or fr24feed's raw output, and re-run the installer. Nothing was changed on your device |
+| No data on the map, forwarder log shows connection refused | Your decoder is not running | Start your decoder as you usually do; the installer never starts it for you |
 | Heartbeat returns 404 | Receiver removed or disabled server-side | Re-run the installer to re-register |
 | "Receiver not found" when claiming | Wrong UUID pasted (ultrafeeder/readsb UUID instead of the Dataero one) | Use `sudo grep RECEIVER_UUID /usr/local/dataero-adsb-feeder/.env` |
 | No data on the map | Forwarder stopped, or no reception | Check `dataero-readsb.service` logs and your antenna |

@@ -27,7 +27,10 @@
 #   UUID             (required) feeder receiver id (from Dataero registration)
 #   HUB_HOST         hub host the reduced Beast goes to   (default: adsb.dataero.eu)
 #   HUB_PORT         hub Beast ingest port                (default: 30005)
-#   LOCAL_BEAST_PORT main decoder Beast output to tap     (default: 30005)
+#   LOCAL_SOURCE_PORT   decoder output to read           (default: LOCAL_BEAST_PORT, else 30005)
+#   LOCAL_SOURCE_FORMAT beast (Beast, readsb/dump1090/Pi24) or raw (AVR text,
+#                       e.g. fr24feed's raw output on 30002) (default: beast)
+#   LOCAL_BEAST_PORT    legacy name of LOCAL_SOURCE_PORT (kept for old .env files)
 #   REDUCE_INTERVAL  position-throttle seconds            (default: 0.25)
 #   READSB_BIN       readsb binary                        (autodetected)
 #   READSB_DEFAULT   shared config path (self-heal only)  (default: /etc/default/readsb)
@@ -38,15 +41,23 @@ set -euo pipefail
 HUB_HOST="${HUB_HOST:-adsb.dataero.eu}"
 HUB_PORT="${HUB_PORT:-30005}"
 UUID="${UUID:?UUID required (feeder receiver id from Dataero registration)}"
-LOCAL_BEAST_PORT="${LOCAL_BEAST_PORT:-30005}"
+LOCAL_SOURCE_PORT="${LOCAL_SOURCE_PORT:-${LOCAL_BEAST_PORT:-30005}}"
+LOCAL_SOURCE_FORMAT="${LOCAL_SOURCE_FORMAT:-beast}"
+case "$LOCAL_SOURCE_FORMAT" in
+    beast) IN_PROTO="beast_in" ;;
+    raw)   IN_PROTO="raw_in" ;;
+    *) echo "❌ LOCAL_SOURCE_FORMAT must be beast or raw (got '$LOCAL_SOURCE_FORMAT')." >&2; exit 1 ;;
+esac
 REDUCE_INTERVAL="${REDUCE_INTERVAL:-0.25}"
 READSB_DEFAULT="${READSB_DEFAULT:-/etc/default/readsb}"
 SERVICE_FILE="/etc/systemd/system/dataero-readsb.service"
 
 # Locate the readsb binary — we REUSE it, we do not install or reconfigure it.
+# On a host without readsb (Flightradar24 Pi24, PiAware) it is the net-only build
+# in /usr/local/dataero-adsb-feeder/bin (feeder/build_readsb_netonly.sh, ADSB-71).
 READSB_BIN="${READSB_BIN:-$(command -v readsb || true)}"
 if [ -z "$READSB_BIN" ]; then
-    for c in /usr/bin/readsb /usr/local/bin/readsb; do
+    for c in /usr/bin/readsb /usr/local/bin/readsb /usr/local/dataero-adsb-feeder/bin/readsb; do
         [ -x "$c" ] && READSB_BIN="$c" && break
     done
 fi
@@ -100,7 +111,7 @@ Wants=network-online.target
 # --net-only: networking, NO SDR (we never touch the radio or the main decoder).
 # Reads the local decoder's Beast output read-only and forwards a reduced stream.
 ExecStart=$READSB_BIN --net-only --quiet \\
-  --net-connector=127.0.0.1,$LOCAL_BEAST_PORT,beast_in \\
+  --net-connector=127.0.0.1,$LOCAL_SOURCE_PORT,$IN_PROTO \\
   --net-connector=$HUB_HOST,$HUB_PORT,beast_reduce_plus_out,uuid=$UUID \\
   --net-beast-reduce-interval $REDUCE_INTERVAL
 Restart=always
@@ -114,4 +125,4 @@ echo "🔄 Enabling + starting dataero-readsb.service..."
 sudo systemctl daemon-reload
 sudo systemctl enable dataero-readsb.service
 sudo systemctl restart dataero-readsb.service
-echo "✅ dataero-readsb.service up: taps 127.0.0.1:$LOCAL_BEAST_PORT (read-only) -> reduced Beast (uuid $UUID) -> $HUB_HOST:$HUB_PORT. Shared decoder untouched."
+echo "✅ dataero-readsb.service up: reads 127.0.0.1:$LOCAL_SOURCE_PORT ($LOCAL_SOURCE_FORMAT, read-only) -> reduced Beast (uuid $UUID) -> $HUB_HOST:$HUB_PORT. Shared decoder untouched."

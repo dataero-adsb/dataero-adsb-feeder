@@ -98,26 +98,21 @@ if [ -d "$VENV_DIR" ] && [ ! -x "$VENV_DIR/bin/pip" ]; then
     sudo rm -rf "$VENV_DIR"
 fi
 
-# Detect the ADS-B data source. The feeder is a passive read-only consumer
-# of an aircraft.json — readsb and the various dump1090 forks all emit the
-# same wiedehopf-format file, so any of them works. The detection has two
-# stages:
+# ──────────────────────────────────────────────────────────────────────────
+# Decoder detection - COEXISTENCE RULE (ADSB-71)
 #
-#   1. Probe a known list of decoder systemd units in priority order.
-#      `systemctl cat` (rather than `list-units --all`) only succeeds when a
-#      real unit file exists on disk, avoiding false positives from orphan
-#      unit references left behind by half-removed packages.
-#
-#   2. Safety net: if no known unit matched but something on the host is
-#      already producing /run/<dir>/aircraft.json, consume that instead of
-#      offering to install readsb. This is what keeps us from ever causing
-#      an SDR collision on a host that already has an unfamiliar decoder
-#      (e.g. dump1090-mutability on legacy Raspbian, or a hand-rolled build
-#      with a non-standard unit name). Co-existing with FlightAware,
-#      Flightradar24, ADSBExchange, etc. is fine — they're all just
-#      additional readers of the same file.
-#
-# Only when both stages find nothing do we offer to install readsb.
+# Dataero is added NEXT TO whatever already feeds from this receiver
+# (Flightradar24 fr24feed / Pi24 image, PiAware, readsb, ultrafeeder, ...).
+# The installer:
+#   * never starts, stops, restarts, enables, disables or edits a unit or a
+#     config file that is not dataero-*;
+#   * never installs a decoder when any decoder or feeder is already present,
+#     so the radio dongle is never taken away from fr24feed or dump1090;
+#   * reads the existing decoder's TCP output as ONE MORE READER, exactly like
+#     every other feeder does. The format (Beast or AVR raw) is decided from the
+#     bytes actually received (feeder/detect_local_feed.py), never assumed.
+# Only when NOTHING is present (fresh Pi) does it offer to install readsb.
+# ──────────────────────────────────────────────────────────────────────────
 DATA_SOURCE_UNIT=""
 DATA_SOURCE_FILE=""
 
@@ -128,16 +123,13 @@ for d in "${KNOWN_DECODERS[@]}"; do
     if systemctl cat "${d}.service" &> /dev/null; then
         DATA_SOURCE_UNIT="${d}.service"
         DATA_SOURCE_FILE="/run/${d}/aircraft.json"
-        echo "✅ Detected ${d}.service as the data source."
+        echo "✅ Detected ${d}.service on this receiver."
         break
     fi
 done
 
-# Stage 2: any /run/*/aircraft.json producer, even if its unit name is not
-# one we recognise. We try to map the directory back to a systemd unit so
-# we can still bind Requires=/After=; if the unit name doesn't match the
-# directory we just skip the ordering and rely on Restart=always to recover
-# if the feeder loses the file briefly.
+# Stage 2: any /run/*/aircraft.json producer, even if its unit name is not one
+# we recognise (e.g. dump1090-mutability started by fr24feed itself).
 if [ -z "$DATA_SOURCE_FILE" ]; then
     for f in /run/*/aircraft.json; do
         [ -e "$f" ] || continue
@@ -145,90 +137,120 @@ if [ -z "$DATA_SOURCE_FILE" ]; then
         DATA_SOURCE_FILE="$f"
         if systemctl cat "${candidate_dir}.service" &> /dev/null; then
             DATA_SOURCE_UNIT="${candidate_dir}.service"
-            echo "✅ Detected an existing decoder at $f (unit: $DATA_SOURCE_UNIT)."
-        else
-            echo "✅ Detected an existing decoder at $f."
-            echo "   ℹ️  No matching systemd unit named ${candidate_dir}.service —"
-            echo "      skipping Requires=/After= ordering for the feeder service."
         fi
+        echo "✅ Detected an existing decoder at $f."
         break
     done
 fi
 
-# Stage 3: nothing found anywhere. Now it's safe to offer readsb because we
-# know we won't be installing it on top of an existing SDR consumer.
-if [ -z "$DATA_SOURCE_FILE" ]; then
-    echo "❌ No ADS-B decoder service found, and no /run/*/aircraft.json on disk."
-    read -p "Do you want to automatically install readsb? (yes/no): " install_readsb
+# Stage 3: every other feeder / decoder unit or process that may own the dongle.
+# These are only LOOKED AT (systemctl cat / show, pgrep) - never acted upon.
+FOREIGN_CANDIDATES=(readsb dump1090-fa dump1090-mutability dump1090 fr24feed piaware
+    adsbexchange-feed adsbexchange-mlat rbfeeder pfclient opensky-feeder
+    mlat-client dump978-fa skyaware978 tar1090 rtl_tcp)
+FOREIGN_UNITS=()
+for u in "${FOREIGN_CANDIDATES[@]}"; do
+    systemctl cat "${u}.service" &> /dev/null && FOREIGN_UNITS+=("${u}.service")
+done
+OUR_FWD_PID=$(systemctl show -p MainPID --value dataero-readsb.service 2>/dev/null || echo 0)
+SDR_PROCS=$(pgrep -a -f '(^|/)(fr24feed|dump1090[^ ]*|readsb|rtl_tcp|rtl_adsb|dump978[^ ]*)( |$)' 2>/dev/null \
+    | awk -v ours="${OUR_FWD_PID:-0}" -v me="$$" '$1 != ours && $1 != me' \
+    | grep -v -e 'dataero-adsb-feeder' -e 'pgrep' || true)
+
+# Before-snapshot of every foreign unit: proves at the end that nothing of
+# theirs was restarted by this installer.
+_snapshot_foreign() {
+    local u
+    for u in "${FOREIGN_UNITS[@]}"; do
+        echo "$u $(systemctl show -p ActiveState --value "$u" 2>/dev/null) pid=$(systemctl show -p MainPID --value "$u" 2>/dev/null)"
+    done
+}
+FOREIGN_BEFORE="$(_snapshot_foreign)"
+
+echo "🔎 Looking for your decoder's output on 127.0.0.1 (read-only, a few seconds)..."
+LOCAL_FEED=$(python3 "$(dirname "$0")/feeder/detect_local_feed.py")
+
+DECODER_PRESENT="no"
+if [ -n "$DATA_SOURCE_FILE" ] || [ ${#FOREIGN_UNITS[@]} -gt 0 ] || [ -n "$SDR_PROCS" ] || [ "$LOCAL_FEED" != "none" ]; then
+    DECODER_PRESENT="yes"
+fi
+
+if [ "$DECODER_PRESENT" = "yes" ]; then
+    echo "🤝 Existing ADS-B setup found - Dataero will be added in parallel, nothing of yours is changed:"
+    [ ${#FOREIGN_UNITS[@]} -gt 0 ] && echo "     services: ${FOREIGN_UNITS[*]}"
+    [ -n "$SDR_PROCS" ] && echo "$SDR_PROCS" | awk '{print "     process:  " $2}' | sort -u
+    [ -n "$DATA_SOURCE_FILE" ] && echo "     data:     $DATA_SOURCE_FILE"
+    if [ -n "$DATA_SOURCE_UNIT" ] && ! systemctl is-active --quiet "$DATA_SOURCE_UNIT"; then
+        echo "⚠️  $DATA_SOURCE_UNIT is not running. The installer does not start it - that is your"
+        echo "   decoder. Dataero picks up its output as soon as it runs."
+    fi
+else
+    echo "ℹ️  No ADS-B decoder or feeder found on this device (no service, no process, nothing"
+    echo "   on 127.0.0.1:30005 or :30002)."
+    read -p "Do you want to install the readsb decoder now? (yes/no): " install_readsb
     if [[ "$install_readsb" == "yes" ]]; then
         echo "🔄 Installing readsb..."
         bash "$(dirname "$0")/feeder/install_readsb.sh"
-
-        if systemctl cat readsb.service &> /dev/null; then
-            DATA_SOURCE_UNIT="readsb.service"
-            DATA_SOURCE_FILE="/run/readsb/aircraft.json"
-            echo "✅ readsb.service is now installed."
-        else
+        if ! systemctl cat readsb.service &> /dev/null; then
             echo "❌ Failed to install readsb.service. Please install it manually."
             exit 1
         fi
+        DATA_SOURCE_UNIT="readsb.service"
+        DATA_SOURCE_FILE="/run/readsb/aircraft.json"
+        echo "✅ readsb.service is now installed."
+        LOCAL_FEED=$(python3 "$(dirname "$0")/feeder/detect_local_feed.py")
+        [ "$LOCAL_FEED" = "none" ] && LOCAL_FEED="silent-beast 30005"
     else
-        echo "❌ A decoder (readsb, dump1090-fa, dump1090-mutability, or compatible)"
-        echo "   is required for this feeder to function."
+        echo "❌ A decoder (readsb, dump1090, fr24feed, ...) is required for this feeder to function."
         exit 1
     fi
 fi
 
-# Ensure the chosen decoder is running — but only when we know its unit name.
-# In the unknown-unit case the producer is already writing aircraft.json by
-# the time we got here (Stage 2 confirmed the file exists), so there's
-# nothing for us to start.
-if [ -n "$DATA_SOURCE_UNIT" ]; then
-    if ! systemctl is-active --quiet "$DATA_SOURCE_UNIT"; then
-        echo "⚠️ $DATA_SOURCE_UNIT is not running. Attempting to start it..."
-        sudo systemctl start "$DATA_SOURCE_UNIT"
-        if systemctl is-active --quiet "$DATA_SOURCE_UNIT"; then
-            echo "✅ $DATA_SOURCE_UNIT started successfully."
-        else
-            echo "❌ Failed to start $DATA_SOURCE_UNIT. Please start it manually."
-            exit 1
-        fi
-    else
-        echo "✅ $DATA_SOURCE_UNIT is already running."
-    fi
+# What the Dataero forwarder will read.
+SRC_KIND="${LOCAL_FEED%% *}"
+SRC_PORT="${LOCAL_FEED##* }"
+case "$SRC_KIND" in
+    beast|silent-beast) SRC_FORMAT="beast" ;;
+    raw|silent-raw)     SRC_FORMAT="raw" ;;
+    *)
+        echo ""
+        echo "❌ Your decoder does not offer an output Dataero can read: nothing answers on"
+        echo "   127.0.0.1:30005 (Beast) or 127.0.0.1:30002 (raw)."
+        echo "   Your decoder and your other feeds were not changed and keep running as before."
+        echo "   On a Flightradar24 receiver, turn on its raw data output (port 30002) in the"
+        echo "   fr24feed settings, or the Beast output (port 30005) of its decoder, then re-run"
+        echo "   this installer. Need help? https://radar.dataero.eu/contribute/connect"
+        exit 1
+        ;;
+esac
+case "$SRC_KIND" in
+    silent-*)
+        echo "⚠️  127.0.0.1:$SRC_PORT is open but sent no aircraft in the last seconds (none in range?)."
+        echo "   Continuing: Dataero forwards them as soon as your decoder hears some." ;;
+    *)  echo "✅ Reading your decoder's ${SRC_FORMAT} output on 127.0.0.1:$SRC_PORT (one more reader, like every feeder)." ;;
+esac
+if [ "$SRC_FORMAT" = "raw" ]; then
+    echo "   ℹ️  Raw output carries no precise timing: MLAT is not available with this source."
 fi
 
-# ──────────────────────────────────────────────────────────────────────────
-# Feed mode — direct reduced Beast over TCP (readsb only; ADSB-34).
-#
-# The feeder registers with the Dataero registrar, which assigns a PUBLIC
-# ingest hub endpoint. A DEDICATED net-only readsb instance
-# (dataero-readsb.service) taps the local decoder read-only and forwards a
-# reduced Beast stream (with UUID) straight to that hub over plain TCP
-# (feeder/configure_readsb_reduce.sh). main.py then only heartbeats the
-# registrar. The in-band UUID proves identity on the wire.
-#
-# BUBBLE RULE: the installer does NOT modify or restart the shared decoder, so it
-# can never disturb other feeders (FR24, FlightAware, Adsb-Italia, ...). readsb is
-# required only as a Beast source on 127.0.0.1:30005 (its default output) — the
-# same port every other feeder taps. The HTTPS/json fallback was removed. Every
-# install registers the receiver UNCLAIMED (feed-first, claim-later — the PiAware
-# model): it feeds immediately, and the operator later binds it to their account
-# from the radar.dataero.eu profile → Receiver tab using the receiver UUID
-# printed at the end of the install.
-# ──────────────────────────────────────────────────────────────────────────
-echo ""
-if [ "$DATA_SOURCE_UNIT" != "readsb.service" ]; then
-    echo "❌ This feeder requires readsb — it feeds Dataero via a direct reduced"
-    echo "   Beast stream, which relies on readsb's native beast_reduce_plus_out connector."
-    echo "   Detected decoder: ${DATA_SOURCE_UNIT:-${DATA_SOURCE_FILE:-none}}."
-    echo "   Install readsb (https://github.com/wiedehopf/readsb) and re-run this installer."
-    exit 1
+# The forwarder binary: the host's own readsb when it has one, else a net-only
+# readsb built for Dataero (no SDR driver - it cannot touch the dongle).
+READSB_BIN="$(command -v readsb || true)"
+if [ -z "$READSB_BIN" ]; then
+    for c in /usr/bin/readsb /usr/local/bin/readsb; do
+        [ -x "$c" ] && READSB_BIN="$c" && break
+    done
 fi
+if [ -z "$READSB_BIN" ]; then
+    echo "🔧 No readsb binary on this device: building the Dataero forwarder (net-only, no SDR driver)..."
+    DEST="$INSTALL_DIR/bin/readsb" bash "$(dirname "$0")/feeder/build_readsb_netonly.sh"
+    READSB_BIN="$INSTALL_DIR/bin/readsb"
+fi
+
 FEED_MODE="beast"
-echo "📡 Direct Beast mode — this device will register with Dataero, and readsb will"
-echo "   forward reduced Beast (with UUID) straight to its assigned ingest hub over"
-echo "   plain TCP (configured next)."
+echo "📡 Direct Beast mode - this device will register with Dataero, and a dedicated"
+echo "   net-only forwarder will send a reduced Beast stream (with UUID) to its"
+echo "   assigned ingest hub over plain TCP (configured next)."
 
 # Registrar base URL (HTTPS, behind HAProxy). Overridable for staging.
 REGISTRAR_URL="${REGISTRAR_URL:-https://adsb.dataero.eu}"
@@ -331,8 +353,14 @@ if [ "$FEED_MODE" = "beast" ]; then
     echo "    using your receiver together with others nearby. It requires an accurate"
     echo "    surveyed antenna position (lat/lon/altitude)."
     _mlat_default="n"; [[ "${EXISTING_MLAT_ENABLED,,}" =~ ^(1|true|yes)$ ]] && _mlat_default="y"
-    read -p "    Enable MLAT for this receiver? (y/N) [${_mlat_default}]: " _mlat_ans
-    _mlat_ans="${_mlat_ans:-$_mlat_default}"
+    if [ "$SRC_FORMAT" = "beast" ]; then
+        read -p "    Enable MLAT for this receiver? (y/N) [${_mlat_default}]: " _mlat_ans
+        _mlat_ans="${_mlat_ans:-$_mlat_default}"
+    else
+        # ADSB-71: a raw (AVR) source has no 12 MHz timestamps - MLAT cannot work.
+        echo "    Not available here: your decoder offers raw output only (no precise timing)."
+        _mlat_ans="n"
+    fi
     if [[ "$_mlat_ans" =~ ^([Yy]|[Yy][Ee][Ss])$ ]]; then
         MLAT_ENABLED="true"
     else
@@ -413,6 +441,10 @@ if [ "$FEED_MODE" = "beast" ]; then
         echo "FEEDER_LON=$FEEDER_LON"
         echo "FEEDER_ALT_M=$FEEDER_ALT_M"
         echo "REDUCE_INTERVAL=$REDUCE_INTERVAL"
+        # ADSB-71: what the forwarder reads and which binary runs it.
+        echo "LOCAL_SOURCE_FORMAT=$SRC_FORMAT"
+        echo "LOCAL_SOURCE_PORT=$SRC_PORT"
+        echo "READSB_BIN=$READSB_BIN"
         # Direct mode (ADSB-34): no shard/tunnel. Written empty so the daemon's
         # first-heartbeat no-op check matches and a later legacy assignment (if the
         # server ever sends one) can still populate them.
@@ -433,9 +465,9 @@ if [ "$FEED_MODE" = "beast" ]; then
     # Direct mode: readsb dials the public Beast endpoint straight over TCP.
     # (feeder/wg_setup.sh is retained for the daemon's legacy dual-mode path but
     # is not invoked on a direct install.)
-    echo "🔧 Setting up the Dataero feed (dedicated net-only readsb instance; the shared decoder is NOT modified) -> $BEAST_HOST:$BEAST_PORT ..."
+    echo "🔧 Setting up the Dataero feed (dedicated net-only forwarder; your decoder and other feeds are NOT modified) -> $BEAST_HOST:$BEAST_PORT ..."
     UUID="$RECEIVER_UUID" HUB_HOST="$BEAST_HOST" HUB_PORT="$BEAST_PORT" REDUCE_INTERVAL="$REDUCE_INTERVAL" \
-        LOCAL_BEAST_PORT="${LOCAL_BEAST_PORT:-30005}" \
+        LOCAL_SOURCE_PORT="$SRC_PORT" LOCAL_SOURCE_FORMAT="$SRC_FORMAT" READSB_BIN="$READSB_BIN" \
         bash "$(dirname "$0")/feeder/configure_readsb_reduce.sh"
 
     # MLAT (epic ADSB-17): if the operator opted in AND the server accepted it
@@ -443,14 +475,14 @@ if [ "$FEED_MODE" = "beast" ]; then
     # + start mlat-client. It reads the LOCAL full Beast (127.0.0.1:30005 — not the
     # reduced hub stream) and dials the central mlat-server, running alongside the
     # reduce connector (two independent consumers of the same readsb).
-    if [ "$MLAT_EFFECTIVE" = "true" ] && [ -n "$MLAT_SERVER_HOST" ]; then
+    if [ "$MLAT_EFFECTIVE" = "true" ] && [ -n "$MLAT_SERVER_HOST" ] && [ "$SRC_FORMAT" = "beast" ]; then
         echo "🛰️  Setting up MLAT (mlat-client -> $MLAT_SERVER_HOST:$MLAT_SERVER_PORT) ..."
         MLAT_VENV="$INSTALL_DIR/.venv-mlat" \
             bash "$(dirname "$0")/feeder/install_mlat_client.sh"
         MLAT_VENV="$INSTALL_DIR/.venv-mlat" RECEIVER_UUID="$RECEIVER_UUID" \
             MLAT_SERVER_HOST="$MLAT_SERVER_HOST" MLAT_SERVER_PORT="$MLAT_SERVER_PORT" \
             FEEDER_LAT="$FEEDER_LAT" FEEDER_LON="$FEEDER_LON" FEEDER_ALT_M="$FEEDER_ALT_M" \
-            MLAT_USER="${FEEDER_NAME:-$RECEIVER_UUID}" \
+            MLAT_USER="${FEEDER_NAME:-$RECEIVER_UUID}" BEAST_IN="127.0.0.1:$SRC_PORT" \
             bash "$(dirname "$0")/feeder/configure_mlat_client.sh"
     elif [ "$MLAT_ENABLED_REQ" = "true" ]; then
         # Opted in but not started: either the server declined (no position) or
@@ -466,14 +498,14 @@ if [ "$FEED_MODE" = "beast" ]; then
     fi
 fi
 
-# Create systemd service file. Requires=/After= are only emitted when we
-# matched a known systemd unit; in the unknown-unit safety-net case we omit
-# them and rely on Restart=always plus main.py's tolerance of a missing
-# aircraft.json so the feeder catches up once its decoder is producing.
+# Create systemd service file. After= is only emitted when we matched a known
+# decoder unit; otherwise Restart=always plus main.py's tolerance of a missing
+# aircraft.json let the feeder catch up once the decoder is producing.
+# ADSB-71: ordering only. Never Requires=/Wants= on a unit that is not ours -
+# starting dataero-feeder must never start (or pull in) the user's decoder.
 UNIT_DEPS=""
 if [ -n "$DATA_SOURCE_UNIT" ]; then
-    UNIT_DEPS="Requires=$DATA_SOURCE_UNIT
-After=$DATA_SOURCE_UNIT"
+    UNIT_DEPS="After=$DATA_SOURCE_UNIT"
 fi
 
 echo "🛠️ Creating systemd service..."
@@ -587,6 +619,22 @@ if ! systemctl is-active --quiet dataero-feeder.service; then
     echo "❌ Service crashed during startup. View logs with:"
     echo "     sudo journalctl -u dataero-feeder.service -n 50"
     exit 1
+fi
+
+# 4. ADSB-71 proof of non-interference: every foreign decoder/feeder unit must be
+#    exactly as it was before this installer ran (same state, same MainPID =
+#    never restarted).
+FOREIGN_AFTER="$(_snapshot_foreign)"
+if [ ${#FOREIGN_UNITS[@]} -gt 0 ]; then
+    if [ "$FOREIGN_BEFORE" = "$FOREIGN_AFTER" ]; then
+        echo "✅ Your other feeds were not touched (same state and process as before the install):"
+        echo "$FOREIGN_AFTER" | sed 's/^/     /'
+    else
+        echo "⚠️  A service that is not Dataero's changed while the installer ran. This installer"
+        echo "   never starts, stops or restarts them, so something else did - please check it:"
+        echo "   before:"; echo "$FOREIGN_BEFORE" | sed 's/^/     /'
+        echo "   after:";  echo "$FOREIGN_AFTER"  | sed 's/^/     /'
+    fi
 fi
 
 echo ""
