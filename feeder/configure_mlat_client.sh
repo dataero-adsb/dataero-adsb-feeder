@@ -24,7 +24,16 @@
 #   BEAST_IN           local full Beast (default: 127.0.0.1:30005)
 #
 # Idempotent: rewrites the unit and restarts the service.
+#
+# ADSB-72: every value interpolated into the unit is format-checked first
+# (feeder/guards.sh), and MLAT_USER - the station name the operator typed - is
+# reduced to a plain label and written in double quotes. Unquoted, a name with a
+# space ("Daniel Home") was split by systemd into `--user Daniel` + `Home`,
+# mlat-client exited 2 ("unrecognized arguments: Home") and Restart=always looped
+# every 30 s: MLAT never started for any station name containing a space.
 set -euo pipefail
+# shellcheck source=guards.sh
+source "$(dirname "${BASH_SOURCE[0]}")/guards.sh"
 
 MLAT_VENV="${MLAT_VENV:-/usr/local/dataero-adsb-feeder/.venv-mlat}"
 RECEIVER_UUID="${RECEIVER_UUID:?RECEIVER_UUID required}"
@@ -40,6 +49,24 @@ SERVICE_FILE="/etc/systemd/system/dataero-mlat.service"
 if [ ! -f "$MLAT_VENV/bin/mlat-client" ]; then
     echo "❌ mlat-client not found at $MLAT_VENV/bin/mlat-client — run install_mlat_client.sh first." >&2
     exit 1
+fi
+
+# ── ADSB-72: nothing below is written until every input has its expected format.
+require_abs_path MLAT_VENV
+require_abs_path SERVICE_FILE
+require_uuid RECEIVER_UUID
+require_host MLAT_SERVER_HOST
+require_port MLAT_SERVER_PORT
+require_signed_decimal FEEDER_LAT
+require_signed_decimal FEEDER_LON
+require_signed_decimal FEEDER_ALT_M
+require_hostport BEAST_IN
+# The contact label is free text from the operator: keep letters, digits, space,
+# dot, underscore and dash; fall back to the receiver UUID when nothing is left.
+_MLAT_USER_IN="$MLAT_USER"
+label_for_systemd MLAT_USER "$RECEIVER_UUID"
+if [ "$MLAT_USER" != "$_MLAT_USER_IN" ]; then
+    echo "ℹ️  MLAT contact label simplified to \"$MLAT_USER\" (only letters, digits, space, . _ - are kept)."
 fi
 
 # Invoke via the venv python explicitly: the mlat-client script's
@@ -58,7 +85,7 @@ ExecStart=$MLAT_VENV/bin/python $MLAT_VENV/bin/mlat-client \\
   --input-type dump1090 \\
   --input-connect $BEAST_IN \\
   --server $MLAT_SERVER_HOST:$MLAT_SERVER_PORT \\
-  --user $MLAT_USER \\
+  --user "$MLAT_USER" \\
   --uuid $RECEIVER_UUID \\
   --lat $FEEDER_LAT --lon $FEEDER_LON --alt ${FEEDER_ALT_M}m
 Restart=always
@@ -72,4 +99,4 @@ echo "🔄 Enabling + starting dataero-mlat.service..."
 sudo systemctl daemon-reload
 sudo systemctl enable dataero-mlat.service
 sudo systemctl restart dataero-mlat.service
-echo "✅ mlat-client running: $BEAST_IN -> mlat-server $MLAT_SERVER_HOST:$MLAT_SERVER_PORT (uuid $RECEIVER_UUID)."
+echo "✅ mlat-client running: $BEAST_IN -> mlat-server $MLAT_SERVER_HOST:$MLAT_SERVER_PORT (uuid $RECEIVER_UUID, user \"$MLAT_USER\")."

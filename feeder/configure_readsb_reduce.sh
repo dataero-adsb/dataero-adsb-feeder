@@ -36,7 +36,14 @@
 #   READSB_DEFAULT   shared config path (self-heal only)  (default: /etc/default/readsb)
 #
 # Idempotent: rewrites our unit + restarts only OUR service.
+#
+# ADSB-72: every value interpolated into the unit below is format-checked first
+# (feeder/guards.sh). HUB_HOST/HUB_PORT come from the server (registration
+# response, then every heartbeat); a newline in beast_host used to add its own
+# `ExecStartPre=` line to this unit, which then ran as root.
 set -euo pipefail
+# shellcheck source=guards.sh
+source "$(dirname "${BASH_SOURCE[0]}")/guards.sh"
 
 HUB_HOST="${HUB_HOST:-adsb.dataero.eu}"
 HUB_PORT="${HUB_PORT:-30005}"
@@ -65,6 +72,17 @@ if [ -z "$READSB_BIN" ] || [ ! -x "$READSB_BIN" ]; then
     echo "❌ readsb binary not found — cannot start the Dataero feed instance." >&2
     exit 1
 fi
+
+# ── ADSB-72: nothing below this line is written until every input has the
+# format it must have. systemd gives a meaning to newlines, quotes, backslash,
+# whitespace, `$` and `%` inside ExecStart=; none of these can pass here.
+require_host HUB_HOST
+require_port HUB_PORT
+require_uuid UUID
+require_port LOCAL_SOURCE_PORT
+require_decimal REDUCE_INTERVAL
+require_abs_path READSB_BIN
+require_abs_path SERVICE_FILE
 
 # ── Self-heal: undo any /etc/default/readsb edit a PREVIOUS Dataero install made.
 # Match by DESTINATION (any of OUR endpoints), NOT by the current uuid — older

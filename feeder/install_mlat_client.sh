@@ -9,14 +9,17 @@
 # Env / config:
 #   MLAT_VENV   install venv          (default: /usr/local/dataero-adsb-feeder/.venv-mlat)
 #   MLAT_REPO   mlat-client git repo  (default: wiedehopf/mlat-client)
-#   MLAT_REF    git ref to install    (default: master)
+#   MLAT_REF    git ref to install    (default: the pinned commit below)
 #
 # Idempotent: rebuilds the venv from scratch each run.
 set -euo pipefail
 
 MLAT_VENV="${MLAT_VENV:-/usr/local/dataero-adsb-feeder/.venv-mlat}"
 MLAT_REPO="${MLAT_REPO:-https://github.com/wiedehopf/mlat-client.git}"
-MLAT_REF="${MLAT_REF:-master}"
+# ADSB-72: pinned to a commit instead of `master`, so every feeder builds the
+# same, reviewed code and an upstream change cannot land on the fleet unseen.
+# wiedehopf/mlat-client master as of 2026-10-26. Bump deliberately, on a ticket.
+MLAT_REF="${MLAT_REF:-28ae4f7409c9dfddd2bb8984baadce5d31fdc8e3}"
 
 echo "📦 Installing mlat-client build prerequisites (git, build-essential, python3-dev)..."
 sudo apt-get install -y --no-install-recommends git build-essential python3-dev python3-venv

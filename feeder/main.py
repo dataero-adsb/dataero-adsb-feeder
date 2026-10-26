@@ -3,11 +3,17 @@
 # See LICENSE in the project root for full terms.
 
 import os
+import re
 import subprocess
 import time
 
 import requests
 from dotenv import load_dotenv
+
+try:  # package import (feeder.main) or sibling-module import (plain script)
+    from . import assignment
+except ImportError:  # pragma: no cover
+    import assignment
 
 # Load environment variables from .env file
 load_dotenv()
@@ -18,7 +24,11 @@ load_dotenv()
 # 1.2.0 = dual-mode (ADSB-34): applies EITHER a direct-Beast assignment (no
 #         wireguard block — readsb forwards straight to the public hub over plain
 #         TCP) OR a legacy WireGuard assignment, whichever the server sends.
-FEEDER_VERSION = "1.2.0"
+# 1.2.1 = ADSB-72: every heartbeat config value is validated against a fixed
+#         format before it reaches a systemd unit, the WireGuard config or .env
+#         (root command injection reported privately by Daniel, 2026-10-26).
+#         Feeders still reporting 1.2.0 have NOT been re-installed with the fix.
+FEEDER_VERSION = "1.2.1"
 
 # Configuration
 #
@@ -98,10 +108,27 @@ def _maybe_print_error(message):
         print(message, flush=True)
         _last_error_print_ts = now
 
+# What may be written to .env by this daemon (ADSB-72). The file is read by three
+# parsers - python-dotenv here, systemd EnvironmentFile= and the installer's
+# grep/cut - so a value is kept to characters none of them interprets: no
+# newline (a second KEY=VALUE line), no quotes, no whitespace, no $ or %, no
+# backslash. Same charset as feeder/assignment.py SAFE_VALUE_RE.
+_ENV_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
+_ENV_VALUE_RE = assignment.SAFE_VALUE_RE
+
+
 def _update_env_file(updates):
     """Persist KEY=VALUE pairs into the install's .env (single occurrence per
     key — strips any duplicates an older append-style write left behind) and
-    mirror them into os.environ. 0600 like the installer (it holds secrets)."""
+    mirror them into os.environ. 0600 like the installer (it holds secrets).
+
+    Raises ValueError - and writes NOTHING - if any key or value is outside the
+    .env-safe charset (ADSB-72: a newline in a value used to inject lines)."""
+    for k, v in updates.items():
+        if not isinstance(k, str) or not _ENV_KEY_RE.match(k):
+            raise ValueError(f".env: refusing key {k!r}")
+        if isinstance(v, bool) or not isinstance(v, (str, int)) or not _ENV_VALUE_RE.match(str(v)):
+            raise ValueError(f".env: refusing value for {k} (unexpected characters)")
     lines = []
     try:
         with open(ENV_FILE) as f:
@@ -208,11 +235,15 @@ def maybe_apply_config(resp):
       * LEGACY (wireguard block present): run wg_setup.sh + the forwarder."""
     global _applied_epoch, _last_reconfig_fail_ts
     cfg = resp.get("config")
-    epoch = (resp.get("config_epoch") or "").strip()
+    epoch = (str(resp.get("config_epoch") or "")).strip()
     if not cfg or not epoch or epoch == _applied_epoch:
+        return
+    if not isinstance(cfg, dict):
         return
     wg = cfg.get("wireguard") or {}
     agg = cfg.get("aggregator") or {}
+    if not isinstance(wg, dict) or not isinstance(agg, dict):
+        return
     direct = not wg  # ADSB-34: no wireguard block => direct Beast transport
 
     if direct:
@@ -223,6 +254,24 @@ def maybe_apply_config(resp):
                   agg.get("beast_host"), agg.get("beast_port"))
     if any(v in (None, "") for v in needed):
         return  # never act on a partial assignment
+
+    # ADSB-72: a complete assignment is still untrusted. Every value is checked
+    # against its fixed format here, BEFORE anything is compared, run or written.
+    # Only the normalised copy below is used from this point on. An invalid block
+    # is ignored (and said once a minute): the registrar never emits one, so the
+    # server is misconfigured or compromised and this feeder must not act on it.
+    try:
+        norm = assignment.validate_heartbeat_config(cfg, epoch)
+    except assignment.InvalidAssignment as e:
+        log_debug(f"heartbeat config rejected: {e}")
+        _maybe_print_error(f"heartbeat config rejected ({e}); keeping the current "
+                           "assignment. Please report this to Dataero.")
+        return
+    epoch = norm["epoch"]
+    wg = norm["wireguard"] or {}
+    agg = {"beast_host": norm["beast_host"], "beast_port": norm["beast_port"]}
+    cfg = {"shard": norm["shard"] or None, "tunnel_ip": norm["tunnel_ip"] or None,
+           "wireguard": norm["wireguard"], "aggregator": agg}
 
     if _config_matches_applied(cfg):
         _update_env_file({"CONFIG_EPOCH": epoch})

@@ -20,17 +20,34 @@
 #   WG_IFACE          interface / config name               (default: wg-adsb)
 #
 # Idempotent: rewrites the config and bounces the interface on every run.
+#
+# ADSB-72: every value interpolated into the config is format-checked first
+# (feeder/guards.sh). The hub key/endpoint/allowed-ips come from the server
+# (registration, then every heartbeat on the legacy path); wg-quick runs
+# `PostUp =` / `PreUp =` commands from [Interface] as root, so a newline in any
+# of them used to be arbitrary root execution on `wg-quick up`.
 set -euo pipefail
+# shellcheck source=guards.sh
+source "$(dirname "${BASH_SOURCE[0]}")/guards.sh"
 
 WG_IFACE="${WG_IFACE:-wg-adsb}"
 WG_KEEPALIVE="${WG_KEEPALIVE:-25}"
-WG_CONF="/etc/wireguard/${WG_IFACE}.conf"
 
 : "${WG_PRIVKEY:?WG_PRIVKEY required}"
 : "${WG_ADDRESS:?WG_ADDRESS required (e.g. 10.7.0.2/32)}"
 : "${WG_HUB_PUBKEY:?WG_HUB_PUBKEY required}"
 : "${WG_HUB_ENDPOINT:?WG_HUB_ENDPOINT required (host:port)}"
 : "${WG_ALLOWED_IPS:?WG_ALLOWED_IPS required (e.g. 10.7.0.1/32)}"
+
+# ── ADSB-72: nothing below is written until every input has its expected format.
+require_token WG_IFACE 15
+require_wg_key WG_PRIVKEY
+require_wg_key WG_HUB_PUBKEY
+require_cidr_list WG_ADDRESS
+require_cidr_list WG_ALLOWED_IPS
+require_hostport WG_HUB_ENDPOINT
+require_uint WG_KEEPALIVE
+WG_CONF="/etc/wireguard/${WG_IFACE}.conf"
 
 if ! command -v wg-quick &>/dev/null; then
     echo "❌ wg-quick not found. Install with: sudo apt-get install -y wireguard-tools"

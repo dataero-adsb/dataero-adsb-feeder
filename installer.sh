@@ -419,6 +419,23 @@ if [ "$FEED_MODE" = "beast" ]; then
     # MLAT_REASON MLAT_SERVER_HOST MLAT_SERVER_PORT (epic ADSB-17), and CLAIM_URL
     # (the link to bind this unclaimed receiver to an account). In direct mode
     # SHARD/TUNNEL_IP are empty.
+    # ADSB-72: three gates stand between the registrar and this root shell.
+    # register.py (1) validates every field of the response against a fixed
+    # format and (2) shlex-quotes what it prints; this loop (3) refuses to eval
+    # any line that is not KEY=value or KEY='value' from a plain charset. Before
+    # this fix a single quote in e.g. beast_host ended the quoting and the rest of
+    # the value ran here as root (reported privately by Daniel, 2026-10-26).
+    # Keep the charset in step with feeder/assignment.py SAFE_VALUE_RE.
+    _reg_line_re="^[A-Z][A-Z0-9_]*=('[A-Za-z0-9._:/@+=,-]*'|[A-Za-z0-9._:/@+=,-]*)$"
+    while IFS= read -r _reg_line; do
+        if ! [[ "$_reg_line" =~ $_reg_line_re ]]; then
+            echo "❌ Registration response rejected - unexpected line from register.py:"
+            echo "     ${_reg_line//[^[:print:]]/?}"
+            echo "   Nothing was installed. Please report this to Dataero."
+            exit 1
+        fi
+    done <<< "$REG_VARS"
+    unset _reg_line _reg_line_re
     eval "$REG_VARS"
     if [ -z "$BEAST_HOST" ] || [ -z "$BEAST_PORT" ]; then
         echo "❌ Registration response was incomplete (no Beast endpoint):"

@@ -26,13 +26,24 @@ Importable (register_feeder / derive_beast_id) and runnable. As __main__ it read
 config from the environment and prints the resulting WireGuard + aggregator config
 as shell `KEY=VALUE` lines on stdout (so installer.sh can `eval` it), exiting
 non-zero on failure.
+
+ADSB-72: the response is VALIDATED (feeder/assignment.py) before anything is
+printed, and every printed value is shlex-quoted. installer.sh additionally
+refuses to eval any line outside `KEY='safe chars'` - three independent gates
+between the network and the root shell.
 """
 import json
 import os
+import shlex
 import sys
 import time
 
 import requests
+
+try:  # package import (feeder.register) or sibling-module import (plain script)
+    from . import assignment
+except ImportError:  # pragma: no cover
+    import assignment
 
 DEFAULT_REGISTRAR_URL = "https://adsb.dataero.eu"
 # Split connect/read timeouts: fail fast when the registrar is unreachable, but
@@ -167,39 +178,19 @@ def _stderr(msg: str) -> None:
     print(msg, file=sys.stderr, flush=True)
 
 
-def _emit_shell(reg: dict) -> None:
-    """Print the registration result as shell KEY=VALUE lines for installer.sh to eval.
-    Only the fields the installer needs to bring up WireGuard, point readsb at the
-    hub, and persist hub config in .env."""
-    wg = reg.get("wireguard") or {}
-    agg = reg.get("aggregator") or {}
-    mlat = reg.get("mlat") or {}
-    out = {
-        "BEAST_ID": reg.get("beast_id", ""),
-        "SHARD": reg.get("shard", ""),
-        "TUNNEL_IP": reg.get("tunnel_ip", ""),
-        "ENABLED": reg.get("enabled", ""),
-        "WG_ADDRESS": wg.get("address", ""),
-        "WG_HUB_PUBKEY": wg.get("hub_public_key", ""),
-        "WG_HUB_ENDPOINT": wg.get("hub_endpoint", ""),
-        "WG_ALLOWED_IPS": wg.get("allowed_ips", ""),
-        "WG_KEEPALIVE": wg.get("persistent_keepalive", 25),
-        "BEAST_HOST": agg.get("beast_host", ""),
-        "BEAST_PORT": agg.get("beast_port", ""),
-        # MLAT (epic ADSB-17): whether the opt-in was honoured, why not (if so),
-        # and the central mlat-server endpoint to dial when it was. server_host is
-        # empty unless MLAT is deployed AND this feeder opted in with a position.
-        "MLAT_ENABLED": reg.get("mlat_enabled", False),
-        "MLAT_REASON": reg.get("mlat_reason", "") or "",
-        "MLAT_SERVER_HOST": mlat.get("server_host", ""),
-        "MLAT_SERVER_PORT": mlat.get("server_port", ""),
-        # Feed-first, claim-later: set only when the receiver registered without
-        # an api_key — the URL the operator opens (logged in) to claim it.
-        "CLAIM_URL": reg.get("claim_url", "") or "",
-    }
-    for k, v in out.items():
-        # Values are hex / ip / host / int — safe to single-quote for the shell.
-        print(f"{k}='{v}'")
+def _emit_shell(fields: dict) -> None:
+    """Print the VALIDATED registration fields (assignment.validate_registration)
+    as shell KEY=VALUE lines for installer.sh to eval: BEAST_ID SHARD TUNNEL_IP
+    ENABLED WG_* BEAST_HOST BEAST_PORT MLAT_ENABLED MLAT_REASON MLAT_SERVER_HOST
+    MLAT_SERVER_PORT CLAIM_URL SECRET_STATUS.
+
+    ADSB-72: every value goes through shlex.quote(). Before that fix the line
+    was f"{k}='{v}'", so a single quote inside e.g. beast_host ended the quoting
+    and the rest of the value ran as root in the installer's eval. Quoting here
+    is the second gate; validation is the first and the installer's line regex
+    the third - none of them relies on the others."""
+    for k, v in fields.items():
+        print(f"{k}={shlex.quote(str(v))}")
 
 
 def main() -> int:
@@ -228,15 +219,19 @@ def main() -> int:
         _stderr(f"❌ {e}")
         return 1
 
-    # ADSB-34: accept either a legacy tunnel assignment (wireguard.address) or a
-    # direct assignment (aggregator.beast_host). Only a response with neither is
-    # unusable.
-    wg = reg.get("wireguard") or {}
-    agg = reg.get("aggregator") or {}
-    if not wg.get("address") and not agg.get("beast_host"):
-        _stderr(f"❌ registrar returned no usable config: {json.dumps(reg)}")
+    # ADSB-72: nothing from the response reaches the installer's shell before it
+    # has passed the strict format checks. A legitimate registrar never fails
+    # them, so a failure here means a misconfigured or compromised server - the
+    # install stops and changes nothing. (ADSB-34: direct and legacy assignments
+    # are both accepted; a response naming no Beast endpoint is unusable.)
+    try:
+        fields = assignment.validate_registration(reg)
+    except assignment.InvalidAssignment as e:
+        _stderr(f"❌ registrar response rejected ({e}). The server sent a value in an "
+                "unexpected format; nothing was installed. Please report this to Dataero.")
+        _stderr(f"   response: {json.dumps(reg)[:600]}")
         return 1
-    _emit_shell(reg)
+    _emit_shell(fields)
     return 0
 
 
